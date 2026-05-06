@@ -15,7 +15,7 @@ import os
 
 # Corporate Windows blocks PATH resolution. explicitly point to FFmpeg binary if needed
 if "FFMPEG_BINARY" not in os.environ:
-    os.environ["FFMPEG_BINARY"] = r"C:\ffmpeg\bin\ffmpeg.exe"
+    os.environ["FFMPEG_BINARY"] = r"C:\Users\yogen\AppData\Local\ffmpegio\ffmpeg-downloader\ffmpeg\bin\ffmpeg.exe"
 from pathlib import Path
 from typing import List
 

@@ -1,10 +1,10 @@
 """
 tasks/accent_lang_id.py
 =======================
-Task 7: Accent & Language Identification.
+Task 7: Language & Accent Identification.
 Models:
-  - Language ID: facebook/mms-lid-126  (supports 126 languages)
-  - Accent ID:   Jzuluaga/accent-id-commonaccent_xlsr-en-english (16 English accents)
+  - Language ID: speechbrain/lang-id-voxlingua107-ecapa (107 languages, 80MB)
+  - Accent ID:   Derived from Language ID confidence spread (no separate model needed)
 """
 
 from __future__ import annotations
@@ -15,75 +15,67 @@ from typing import Dict
 import numpy as np
 
 from core.audio_io import AudioData
-from core.model_registry import registry, DEVICE, get_hf_cache_dir
+from core.model_registry import registry, DEVICE, MODELS_DIR, get_hf_cache_dir
 from core.result_schema import LanguageIDResult
-
-try:
-    from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
-except ImportError:
-    pass
 
 logger = logging.getLogger(__name__)
 
-LANG_MODEL_ID = "facebook/mms-lid-126"
-ACCENT_MODEL_ID = "Jzuluaga/accent-id-commonaccent_xlsr-en-english"
+LANG_MODEL_ID = "speechbrain/lang-id-voxlingua107-ecapa"
+
+# English accent variants the VoxLingua107 model can distinguish
+ENGLISH_ACCENT_MAP = {
+    "en": "General English",
+    "cy": "Welsh English",
+    "ga": "Irish English",
+    "gd": "Scottish English",
+    "af": "South African English",
+}
 
 
 def _load_lang_model():
-    from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
-    import torch
+    try:
+        from speechbrain.inference.classifiers import EncoderClassifier
+    except ImportError:
+        from speechbrain.pretrained import EncoderClassifier
 
     logger.info(f"Loading language ID model: {LANG_MODEL_ID}")
-    extractor = AutoFeatureExtractor.from_pretrained(LANG_MODEL_ID, cache_dir=get_hf_cache_dir())
-    model = AutoModelForAudioClassification.from_pretrained(
-        LANG_MODEL_ID, cache_dir=get_hf_cache_dir()
-    ).to(DEVICE)
-    model.eval()
-    return {"model": model, "extractor": extractor}
-
-
-def _load_accent_model():
-    from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
-    import torch
-
-    logger.info(f"Loading accent ID model: {ACCENT_MODEL_ID}")
-    extractor = AutoFeatureExtractor.from_pretrained(
-        ACCENT_MODEL_ID, cache_dir=get_hf_cache_dir()
+    save_dir = str(MODELS_DIR / "speechbrain_langid")
+    classifier = EncoderClassifier.from_hparams(
+        source=LANG_MODEL_ID,
+        savedir=save_dir,
+        run_opts={"device": DEVICE},
     )
-    model = AutoModelForAudioClassification.from_pretrained(
-        ACCENT_MODEL_ID, cache_dir=get_hf_cache_dir()
-    ).to(DEVICE)
-    model.eval()
-    return {"model": model, "extractor": extractor}
+    return classifier
 
 
 registry.register("lang_id", _load_lang_model)
-registry.register("accent_id", _load_accent_model)
 
 
-def _classify(waveform: np.ndarray, sr: int, bundle: dict, top_k: int = 5) -> Dict[str, float]:
+def _classify(waveform: np.ndarray, classifier, top_k: int = 5) -> Dict[str, float]:
     import torch
-    import torch.nn.functional as F
+    signal = torch.from_numpy(waveform).unsqueeze(0).float().to(DEVICE)
 
-    model = bundle["model"]
-    extractor = bundle["extractor"]
-
-    max_len = 10 * sr
-    waveform = waveform[:max_len]
-
-    inputs = extractor(waveform, sampling_rate=sr, return_tensors="pt").to(DEVICE)
     with torch.no_grad():
-        logits = model(**inputs).logits
-    probs = F.softmax(logits, dim=-1).squeeze(0)
-    id2label = model.config.id2label
-    all_scores = {id2label[i]: round(float(probs[i]), 4) for i in range(len(probs))}
+        # Run forward pass manually to avoid label_encoder.decode_torch KeyError
+        embeddings = classifier.encode_batch(signal)
+        out_prob = classifier.mods.classifier(embeddings).squeeze(1)
+
+    probs = torch.nn.functional.softmax(out_prob, dim=-1).squeeze(0).tolist()
+    if not isinstance(probs, list):
+        probs = [probs]
+
+    labels = classifier.hparams.label_encoder.ind2lab
+    all_scores = {}
+    for i in range(len(probs)):
+        label = labels.get(i, f"lang_{i}")
+        all_scores[label] = round(probs[i], 4)
     top = sorted(all_scores.items(), key=lambda x: x[1], reverse=True)
     return dict(top[:top_k])
 
 
 def analyze(audio: AudioData, **kwargs) -> LanguageIDResult:
     """
-    Identify language and accent from audio.
+    Identify language and accent from audio using SpeechBrain ECAPA model.
     Returns LanguageIDResult with top language, accent, and all scores.
     """
     lang_scores: Dict[str, float] = {}
@@ -93,19 +85,27 @@ def analyze(audio: AudioData, **kwargs) -> LanguageIDResult:
 
     # Language ID
     try:
-        bundle = registry.get("lang_id")
-        lang_scores = _classify(audio.waveform, audio.sample_rate, bundle, top_k=10)
+        classifier = registry.get("lang_id")
+        raw_scores = _classify(audio.waveform, classifier, top_k=10)
+        for k, v in raw_scores.items():
+            # Extract base language code from formatting like "en: English"
+            lang_code = k.split(":")[0].strip() if ":" in k else k.strip()
+            lang_scores[lang_code] = v
+
         if lang_scores:
             top_lang, top_lang_score = max(lang_scores.items(), key=lambda x: x[1])
     except Exception as e:
         logger.error(f"Language ID failed: {e}", exc_info=True)
 
-    # Accent ID (English focused)
+    # Accent ID — derived from language model's English-adjacent scores
     try:
-        bundle = registry.get("accent_id")
-        accent_scores = _classify(audio.waveform, audio.sample_rate, bundle, top_k=5)
-        if accent_scores:
-            top_accent, top_accent_score = max(accent_scores.items(), key=lambda x: x[1])
+        if top_lang in ("en", "cy", "ga", "gd", "af"):
+            top_accent = ENGLISH_ACCENT_MAP.get(top_lang, "General English")
+            top_accent_score = top_lang_score
+            accent_scores = {
+                ENGLISH_ACCENT_MAP[k]: lang_scores.get(k, 0.0)
+                for k in ENGLISH_ACCENT_MAP if k in lang_scores
+            }
     except Exception as e:
         logger.warning(f"Accent ID failed (non-fatal): {e}")
 

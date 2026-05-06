@@ -29,6 +29,7 @@ os.environ["HF_HUB_VERBOSITY"]           = "error"
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 os.environ["HF_HOME"]    = os.path.join(_ROOT, "models", "hf_cache")
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(_ROOT, "models", "hf_cache")
 os.environ["TORCH_HOME"] = os.path.join(_ROOT, "models", "torch_hub")
 sys.path.insert(0, _ROOT)
 
@@ -103,12 +104,21 @@ def prewarm_models(tasks: list):
         "music_speech_detection": "tasks.music_speech_detection",
         "anomaly_detection": "tasks.anomaly_detection",
         "impulse_event": "tasks.impulse_event",
+        "music_genre": "tasks.music_genre",
     }
 
     def _load_one(task_name):
         try:
+            from core.model_registry import registry
+            keys_before = set(registry._factories.keys())
             mod = importlib.import_module(task_modules[task_name])
-            # Trigger registry.get() to actually load the model weights
+            keys_after = set(registry._factories.keys())
+            new_keys = keys_after - keys_before
+            for key in new_keys:
+                try:
+                    registry.get(key)
+                except Exception:
+                    pass
             return task_name, None
         except Exception as e:
             return task_name, str(e)
@@ -171,6 +181,7 @@ def run_parallel(audio_np, sr, tasks):
         "music_speech_detection": "tasks.music_speech_detection",
         "anomaly_detection": "tasks.anomaly_detection",
         "impulse_event": "tasks.impulse_event",
+        "music_genre": "tasks.music_genre",
     }
 
     def _run_task(task_name):
@@ -210,6 +221,7 @@ LABELS = {
     "music_speech_detection": "Music / Speech Detection",
     "anomaly_detection": "Anomaly Detection",
     "impulse_event": "Impulse Event Detector",
+    "music_genre": "Music Genre Classification",
 }
 
 
@@ -253,6 +265,9 @@ def print_results(results, total_ms, tasks):
                   f"| Accent: {r.get('top_accent','N/A')}")
         elif task_name == "esc":
             print(f"      Sound: {r.get('top_class','')} "
+                  f"({r.get('top_score',0)*100:.1f}%)")
+        elif task_name == "music_genre":
+            print(f"      Genre: {r.get('top_genre','').capitalize()} "
                   f"({r.get('top_score',0)*100:.1f}%)")
         elif task_name == "acoustic_event_detection":
             for ev in (r.get("events") or [])[:3]:

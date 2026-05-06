@@ -51,8 +51,8 @@ def _load_model():
 
     extractor = AutoFeatureExtractor.from_pretrained(MODEL_ID, cache_dir=get_hf_cache_dir())
     model = ASTForAudioClassification.from_pretrained(
-        MODEL_ID, cache_dir=get_hf_cache_dir()
-    ).to(DEVICE)
+        MODEL_ID, cache_dir=get_hf_cache_dir(), device_map=DEVICE
+    )
     model.eval()
     id2label = model.config.id2label
     return {"type": "torch", "model": model, "extractor": extractor, "id2label": id2label}

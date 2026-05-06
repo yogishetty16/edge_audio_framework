@@ -18,13 +18,65 @@ logger = logging.getLogger(__name__)
 _FRAMEWORK_ROOT = Path(__file__).parent.parent          # edge_audio_framework/
 MODELS_DIR: Path = _FRAMEWORK_ROOT / "models"           # edge_audio_framework/models/
 
+# Global Torchaudio Patch for compatibility with newer versions
+try:
+    import torchaudio
+    if not hasattr(torchaudio, "set_audio_backend"):
+        torchaudio.set_audio_backend = lambda backend: None
+except ImportError:
+    pass
+
+# Global Symlink Patch to prevent WinError 1314 on restrictive Windows environments
+def _patch_symlink():
+    import os, shutil, pathlib
+    if hasattr(os, "symlink"):
+        _orig_symlink = os.symlink
+        def safe_symlink(src, dst, *args, **kwargs):
+            try: _orig_symlink(src, dst, *args, **kwargs)
+            except OSError:
+                if os.path.exists(dst) or os.path.islink(dst):
+                    try: os.remove(dst)
+                    except: pass
+                try:
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    if os.path.isdir(src): shutil.copytree(src, dst)
+                    else: shutil.copyfile(src, dst)
+                except Exception: pass
+        os.symlink = safe_symlink
+
+    if hasattr(pathlib.Path, "symlink_to"):
+        _orig_pathlib_symlink = pathlib.Path.symlink_to
+        def safe_pathlib_symlink(self, target, target_is_directory=False):
+            try: _orig_pathlib_symlink(self, target, target_is_directory)
+            except OSError:
+                if self.exists() or self.is_symlink():
+                    try: self.unlink()
+                    except: pass
+                try:
+                    os.makedirs(str(self.parent), exist_ok=True)
+                    t = str(target)
+                    if os.path.isdir(t): shutil.copytree(t, str(self))
+                    else: shutil.copyfile(t, str(self))
+                except Exception: pass
+        pathlib.Path.symlink_to = safe_pathlib_symlink
+
+_patch_symlink()
 
 def get_hf_cache_dir() -> str:
-    """Return HuggingFace cache directory (respects HF_HOME env var)."""
+    """Return HuggingFace cache directory and globally enforce it for all backend libraries."""
     hf_home = os.environ.get("HF_HOME", "")
     if hf_home:
-        return hf_home
-    return str(MODELS_DIR / "hf_cache")
+        cache_dir = hf_home
+    else:
+        cache_dir = str(MODELS_DIR / "hf_cache")
+    
+    # Force huggingface_hub to respect this directory globally
+    os.environ["HF_HOME"] = cache_dir
+    os.environ["HUGGINGFACE_HUB_CACHE"] = cache_dir
+    return cache_dir
+
+# Initialize global cache enforcement immediately on import
+get_hf_cache_dir()
 
 
 # ── Device ─────────────────────────────────────────────────────────────────────

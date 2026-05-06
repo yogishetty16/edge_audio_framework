@@ -31,6 +31,7 @@ _TASK_MODULE_MAP: Dict[str, str] = {
     "audio_quality_monitoring": "tasks.audio_quality_monitor",
     "music_speech_detection":   "tasks.music_speech_detection",
     "anomaly_detection":        "tasks.anomaly_detection",
+    "music_genre":              "tasks.music_genre",
 }
 
 

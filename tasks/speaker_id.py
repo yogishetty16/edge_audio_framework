@@ -14,6 +14,8 @@ from typing import List, Optional
 
 import numpy as np
 
+import numpy as np
+
 from core.audio_io import AudioData
 from core.model_registry import registry, DEVICE, MODELS_DIR, get_hf_cache_dir
 from core.result_schema import SpeakerIDResult, SpeakerSegment, SpeakerVerificationResult
@@ -31,6 +33,49 @@ def _patch_torchaudio():
             torchaudio.get_audio_backend = lambda: "soundfile"
     except ImportError:
         pass
+
+def _patch_symlink():
+    """Bypass Windows corporate admin restrictions on symlinks."""
+    import shutil
+    if hasattr(os, "symlink"):
+        _orig_symlink = os.symlink
+        def safe_symlink(src, dst, *args, **kwargs):
+            try:
+                _orig_symlink(src, dst, *args, **kwargs)
+            except OSError:
+                if os.path.exists(dst) or os.path.islink(dst):
+                    try: os.remove(dst)
+                    except: pass
+                try:
+                    if os.path.isdir(src):
+                        shutil.copytree(src, dst)
+                    else:
+                        shutil.copyfile(src, dst)
+                except Exception:
+                    pass
+        os.symlink = safe_symlink
+
+    import pathlib
+    if hasattr(pathlib.Path, "symlink_to"):
+        _orig_pathlib_symlink = pathlib.Path.symlink_to
+        def safe_pathlib_symlink(self, target, target_is_directory=False):
+            try:
+                _orig_pathlib_symlink(self, target, target_is_directory)
+            except OSError:
+                if self.exists() or self.is_symlink():
+                    try: self.unlink()
+                    except: pass
+                try:
+                    target_str = str(target)
+                    if os.path.isdir(target_str):
+                        shutil.copytree(target_str, str(self))
+                    else:
+                        shutil.copyfile(target_str, str(self))
+                except Exception:
+                    pass
+        pathlib.Path.symlink_to = safe_pathlib_symlink
+
+_patch_symlink()
 
 logger = logging.getLogger(__name__)
 

@@ -70,7 +70,6 @@ def analyze(audio: AudioData, vad_result=None, **kwargs) -> ASRResult:
             best_of=1,
             temperature=0.0,        # greedy decode (fastest)
             condition_on_previous_text=False, # Prevents getting stuck in hallucination loops
-            logprob_threshold=-1.0,           # Discard garbage/noise transcriptions
             compression_ratio_threshold=2.4,  # Automatically discard repeating text like "88888888"
             no_speech_threshold=0.6,          # Stricter check for pure noise
             word_timestamps=False,

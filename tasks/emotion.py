@@ -32,7 +32,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-AUDIO_MODEL_ID = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
+AUDIO_MODEL_ID = "superb/hubert-base-superb-er"
 LOCAL_AUDIO_MODEL_DIR = MODELS_DIR / "emotion_recognition" if _REGISTRY_OK else None
 TEXT_SENTIMENT_MODEL = "cardiffnlp/twitter-roberta-base-sentiment-latest"
 
@@ -51,6 +51,10 @@ EMOTION_LABEL_MAP = {
     "neu": "neutral",
     "sad": "sad",
     "fear": "fearful",
+    "angry": "angry",
+    "happy": "happy",
+    "neutral": "neutral",
+    "surprise": "surprise",
 }
 
 
@@ -74,9 +78,8 @@ def _load_emotion_model():
         model = AutoModelForAudioClassification.from_pretrained(
             AUDIO_MODEL_ID,
             cache_dir=get_hf_cache_dir(),
-            low_cpu_mem_usage=False,
+            device_map=DEVICE,
         )
-    model = model.to(DEVICE)
     model.eval()
     return {"model": model, "extractor": extractor}
 
