@@ -1,0 +1,47 @@
+# ============================================================
+# Edge Audio Framework — requirements.txt (Edge / Real-Time)
+# Optimized for low-latency CPU inference on edge devices
+# Install: pip install -r requirements.txt
+# ============================================================
+
+# ── Core ML runtime ──────────────────────────────────────────
+torch>=2.1.0
+torchaudio>=2.1.0
+onnxruntime>=1.17.0          # CPU ONNX runtime (use onnxruntime-gpu for CUDA)
+optimum[onnxruntime]>=1.17.0 # HuggingFace ONNX export + quantization
+
+# ── ASR (edge-optimized) ──────────────────────────────────────
+faster-whisper>=1.0.0        # CTranslate2 INT8, ~4x faster than openai-whisper
+ctranslate2>=4.0.0
+
+# ── HuggingFace ecosystem ─────────────────────────────────────
+transformers>=4.38.0,<5.0.0
+huggingface_hub>=0.21.0
+accelerate>=0.27.0
+datasets>=2.16.0
+
+# ── Audio I/O ─────────────────────────────────────────────────
+librosa>=0.10.1
+soundfile>=0.12.1
+numpy>=1.24.0
+scipy>=1.11.0
+PyAudio>=0.2.14              # microphone streaming on Windows/Linux
+
+# ── Speaker ID (SpeechBrain) ──────────────────────────────────
+speechbrain>=0.5.16
+
+# ── Music/Speech Segmentation ─────────────────────────────────
+# inaSpeechSegmenter installed via git clone (see download_models.py)
+
+# ── Speech Quality ────────────────────────────────────────────
+pesq>=0.0.4
+pystoi>=0.4.1
+
+# ── Anomaly Detection ─────────────────────────────────────────
+scikit-learn>=1.3.0
+
+# ── Utilities ─────────────────────────────────────────────────
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+click>=8.1.7
+rich>=13.7.0                 # pretty terminal output

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Heavy AI Models & Data (CRITICAL TO IGNORE)
+models/
+data/
+*.wav
+*.mp3
+
+# IDE / OS Files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs and Agent Memory
+agent_memory/
+*.log
+*.jsonl
+
+# Temporary Zips
+*.zip
