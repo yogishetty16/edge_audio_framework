@@ -14,6 +14,8 @@ models/
 data/
 *.wav
 *.mp3
+!sample_data/*.wav
+!sample_data/*.mp3
 
 # IDE / OS Files
 .vscode/
