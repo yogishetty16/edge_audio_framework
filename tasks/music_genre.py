@@ -42,9 +42,8 @@ def _load_music_genre_model() -> Dict[str, Any]:
         model = AutoModelForAudioClassification.from_pretrained(
             MUSIC_GENRE_MODEL_ID,
             cache_dir=str(MODELS_DIR / "hf_cache"),
-            device_map=DEVICE
         )
-        model.eval()
+        model.eval().to(DEVICE)
         logger.info("Music Genre model loaded successfully.")
         return {"extractor": extractor, "model": model}
     except Exception as e:

@@ -78,9 +78,8 @@ def _load_emotion_model():
         model = AutoModelForAudioClassification.from_pretrained(
             AUDIO_MODEL_ID,
             cache_dir=get_hf_cache_dir(),
-            device_map=DEVICE,
         )
-    model.eval()
+    model.eval().to(DEVICE)
     return {"model": model, "extractor": extractor}
 
 

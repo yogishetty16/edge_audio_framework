@@ -1,50 +1,28 @@
 """
-tasks/music_speech_detection.py  [EDGE EDITION]
-================================================
-Task 11: Music / Speech / Noise Detection.
-Model: ina-foss/inaSpeechSegmenter — lightweight CNN (~5MB)
-Labels: speech, music, noise, noEnergy
+tasks/music_speech_detection.py
+================================
+Task 11: Music / Speech / Silence Detection.
+Model: Custom DSP (zero-crossing rate + spectral features)
+Labels: speech, music, silence
 """
 
 from __future__ import annotations
 
 import logging
-import sys
-import tempfile
-import os
-
-# Corporate Windows blocks PATH resolution. explicitly point to FFmpeg binary if needed
-if "FFMPEG_BINARY" not in os.environ:
-    os.environ["FFMPEG_BINARY"] = r"C:\Users\yogen\AppData\Local\ffmpegio\ffmpeg-downloader\ffmpeg\bin\ffmpeg.exe"
-from pathlib import Path
 from typing import List
-
 import numpy as np
-import soundfile as sf
 
 from core.audio_io import AudioData
-from core.model_registry import registry, MODELS_DIR
+from core.model_registry import registry
 from core.result_schema import MusicSpeechResult, MusicSpeechSegment
 
 logger = logging.getLogger(__name__)
 
-INA_REPO = MODELS_DIR / "inaSpeechSegmenter"
-
 
 def _load_model():
-    """Load inaSpeechSegmenter from local git clone or pip install."""
-    # Try local clone first
-    if INA_REPO.exists() and str(INA_REPO) not in sys.path:
-        sys.path.insert(0, str(INA_REPO))
-
-    try:
-        from inaSpeechSegmenter import Segmenter
-        seg = Segmenter(vad_engine="smn", detect_gender=False)
-        logger.info("inaSpeechSegmenter loaded successfully.")
-        return seg
-    except ImportError:
-        logger.warning("inaSpeechSegmenter not found. Install via: pip install inaspeechsegmenter")
-        raise
+    """No external model required. Using built-in librosa DSP."""
+    import librosa
+    return librosa
 
 
 registry.register("music_speech", _load_model)
@@ -52,35 +30,80 @@ registry.register("music_speech", _load_model)
 
 def analyze(audio: AudioData, **kwargs) -> MusicSpeechResult:
     """
-    Segment audio into speech / music / noise / noEnergy regions.
+    Segment audio into speech / music / silence regions using simple DSP heuristics.
     Returns MusicSpeechResult with per-segment labels and summary fractions.
     """
     try:
-        seg = registry.get("music_speech")
+        librosa = registry.get("music_speech")
+        waveform = audio.waveform
+        sr = audio.sample_rate
 
-        # inaSpeechSegmenter needs a WAV file
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            sf.write(tmp.name, audio.waveform, audio.sample_rate)
-            tmp_path = tmp.name
+        # Simple energy-based silence detection
+        rms = librosa.feature.rms(y=waveform)[0]
+        threshold = 0.01  # heuristic threshold for silence
+        is_silence = rms < threshold
 
-        try:
-            seg_output = seg(tmp_path)
-        finally:
-            os.unlink(tmp_path)
+        # Zero-crossing rate (Speech typically has higher variance in ZCR than music)
+        zcr = librosa.feature.zero_crossing_rate(y=waveform)[0]
+        
+        # Spectral centroid (brightness)
+        centroid = librosa.feature.spectral_centroid(y=waveform, sr=sr)[0]
+
+        # Simple heuristic classification per frame
+        frames = len(rms)
+        frame_duration = len(waveform) / sr / frames if frames > 0 else 0.023
 
         segments: List[MusicSpeechSegment] = []
         speech_sec = music_sec = noise_sec = 0.0
+        
+        current_label = None
+        start_time = 0.0
 
-        for label, start, end in seg_output:
+        for i in range(frames):
+            if is_silence[i]:
+                label = "silence"
+            else:
+                # High ZCR variance often indicates unvoiced speech consonants
+                # High centroid often indicates music cymbals/high notes
+                # This is a basic heuristic for edge devices without deep learning
+                if zcr[i] > 0.1 or centroid[i] > 3000:
+                    label = "speech"
+                else:
+                    label = "music"
+
+            if current_label is None:
+                current_label = label
+                start_time = i * frame_duration
+            elif current_label != label:
+                end_time = i * frame_duration
+                segments.append(MusicSpeechSegment(
+                    start_sec=round(float(start_time), 3),
+                    end_sec=round(float(end_time), 3),
+                    label=current_label,
+                ))
+                dur = end_time - start_time
+                if current_label == "speech":
+                    speech_sec += dur
+                elif current_label == "music":
+                    music_sec += dur
+                else:
+                    noise_sec += dur
+                
+                current_label = label
+                start_time = i * frame_duration
+
+        # Last segment
+        if current_label is not None:
+            end_time = frames * frame_duration
             segments.append(MusicSpeechSegment(
-                start_sec=round(float(start), 3),
-                end_sec=round(float(end), 3),
-                label=label,
+                start_sec=round(float(start_time), 3),
+                end_sec=round(float(end_time), 3),
+                label=current_label,
             ))
-            dur = end - start
-            if label == "speech":
+            dur = end_time - start_time
+            if current_label == "speech":
                 speech_sec += dur
-            elif label == "music":
+            elif current_label == "music":
                 music_sec += dur
             else:
                 noise_sec += dur
