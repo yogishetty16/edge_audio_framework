@@ -30,3 +30,6 @@ agent_memory/
 
 # Temporary Zips
 *.zip
+
+models/
+models.zip*
