@@ -142,6 +142,18 @@ python fast_run.py --duration 10            # Record 10 seconds instead of 5
 python fast_run.py --device 1               # Use a specific microphone device
 python fast_run.py --list-devices           # List all available microphone devices
 python fast_run.py --no-prewarm             # Skip model pre-loading (faster startup)
+python fast_run.py --calibrate              # Record 2s ambient baseline and calibrate thresholds
+python fast_run.py --investigations         # Print a formatted report of all investigations and exit
+```
+
+---
+
+### Option C: Simulation Demo (No Microphone Required)
+
+Runs a complete, self-contained simulation demonstrating the entire agentic architecture: environment calibration, distress-triggered alerts, multi-turn follow-up investigations (+10s, +30s, +60s), and watchdog report generations.
+
+```bash
+python demo.py
 ```
 
 ---
@@ -223,6 +235,11 @@ When you run with `--agent`, the framework deploys an advanced **3-Agent Orchest
 1. **Triage Agent** (`agent/triage_agent.py`): Dynamically schedules and filters which tasks to run based on active policy profiles (Balanced, Industrial Safety, Privacy First, Low Power) and recent historical event trends (e.g., repeated noise anomalies, hardware quality degradation).
 2. **Synthesis Agent** (`agent/synthesis_agent.py`): Consumes all raw parallel task results, applies structured Chain-of-Thought (CoT) reasoning, and produces a single unified decision payload (with event classification, priority levels, and detailed operator-facing incident reports).
 3. **Watchdog Agent** (`agent/watchdog_agent.py`): Records decisions in persistent cross-session memory (`agent_memory/events.jsonl`), detects pattern/risk escalations over lookback windows, monitors microphone clipping/SNR, and generates diagnostic watchdog reports.
+
+### Advanced Agentic Capabilities
+
+* **Self-Calibrating Agent** (`agent/calibration_agent.py`): Automatically calibrates the system on startup by recording a 2-second baseline window of ambient environment noise. It classifies the location (e.g. `silent_room`, `office`, `outdoor`, `industrial`, or `machinery_heavy`), configures tailored initial detection thresholds (VAD speech ratios, SNR alerts, anomaly scores, energy spike limits), and dynamically adapts these parameters over time using a false-positive tracking feedback loop.
+* **Multi-Turn Incident Investigation** (`agent/investigation_agent.py`): For any critical HIGH-priority alert (e.g. distress trigger or impulse threat), the orchestrator automatically launches a background multi-turn investigation loop. It schedules follow-up ambient recordings at +10s, +30s, and +60s offsets, builds a comparative risk timeline, and reaches a final threat verdict (`threat_confirmed`, `threat_resolved`, `false_alarm`, or `inconclusive`).
 
 ### Resilience & Fallbacks
 If any agent in the 3-agent orchestration pipeline raises an exception or fails, the orchestrator automatically degrades gracefully to the original deterministic, rule-based decision engine (`agent/audio_agent_rules.py`). This prevents crashes on critical edge deployments.

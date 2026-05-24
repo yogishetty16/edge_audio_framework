@@ -1,3 +1,17 @@
+"""Multi-turn incident investigation agent for edge audio intelligence.
+
+This module schedules and manages background follow-up audio recordings (+10s, +30s, +60s)
+after a HIGH priority event is triggered, compares them to the initial trigger, builds a
+timeline, and reaches a final threat verdict.
+
+Usage/Execution:
+    Print a formatted report of all investigations and exit:
+        python fast_run.py --investigations
+        
+    Simulate full investigation scenario flow:
+        python demo.py
+"""
+
 import json
 import logging
 import uuid

@@ -431,6 +431,31 @@ The agent (`agent/audio_agent.py`) is structured as an advanced **3-Agent Orches
 3. **Watchdog Agent** (`agent/watchdog_agent.py`):
    Records decisions to local JSONL memory (`agent_memory/events.jsonl`), scans for pattern trends over the lookback window, checks for hardware degradations (microphone clipping, low SNR), raises system-wide alert warnings, and feeds diagnostic `watchdog_report` logs back to the Triage Agent.
 
+### Self-Calibrating Agent (CalibrationAgent)
+
+The Calibration Agent (`agent/calibration_agent.py`) optimizes system thresholds dynamically for the specific deployment environment:
+1. **Baseline Capture**: At startup, it records a short 2-second audio window of ambient noise.
+2. **Environment Classification**: Runs lightweight tasks to classify the environment into one of five categories:
+   - `silent_room` (ultra-low ambient noise)
+   - `office` (moderate ambient noise, keyboard taps)
+   - `outdoor` (wind, weather, street traffic)
+   - `industrial` (moderate warehouse/factory hums)
+   - `machinery_heavy` (constant industrial engines, high decibel background)
+3. **Threshold Calibration**: Configures environment-specific initial thresholds for VAD speech ratio, anomaly score sensitivity, SNR alert triggers, and impulse energy spike levels.
+4. **False Positive Tuning**: Tracks false positive rates over a sliding history window (last 20 events per signal). If the false positive rate for a risk signal exceeds 40%, the agent raises the threshold (making it less sensitive). If the false positive rate drops below 5%, the agent lowers the threshold (making it more sensitive).
+
+### Multi-Turn Incident Investigation (InvestigationAgent)
+
+To eliminate false alarms and confirm high-priority events, the Multi-Turn Investigation Agent (`agent/investigation_agent.py`) manages a stateful event-timeline loop:
+1. **Trigger Check**: When the orchestrator decides a HIGH priority event has occurred (e.g. possible safety incident or impulse threat), it opens a new investigation tracking timeline.
+2. **Follow-up Scheduling**: Schedules background audio clip recordings at offsets of **+10s**, **+30s**, and **+60s** from the trigger.
+3. **Comparative Verification**: Compares each follow-up decision's active risk signals against the initial trigger (computing confidence differences and tracing active risk trends).
+4. **Verdict Formulation**: Once all three follow-ups are completed, it evaluates the timeline to produce a threat verdict:
+   - `threat_confirmed` (the risk signals persisted across 2 or more follow-up windows)
+   - `threat_resolved` (the threat signal was confirmed in only 1 window and cleared in the final window)
+   - `false_alarm` (no follow-ups confirmed the threat; triggers dynamic threshold tuning in CalibrationAgent)
+   - `inconclusive` (insufficient data/recording errors)
+
 ### Resilience & Fallbacks
 To guarantee continuous operations on headless edge devices, the orchestrator includes a fail-safe fallback mechanism. If any subagent in the 3-agent pipeline raises an unexpected exception (e.g., file lock issues, model cache corruption, or memory exhaustion), the system catches the error, registers the failure in `task_health`, and immediately falls back to the deterministic, rule-based decision engine (`agent/audio_agent_rules.py`).
 

@@ -1,3 +1,14 @@
+"""Self-calibrating agent for edge audio intelligence.
+
+This module learns the baseline ambient noise level at startup, classifies the location
+into environmental categories, and dynamically tunes detection thresholds based on observed
+false positive rates.
+
+Usage/Execution:
+    Record baseline and calibrate thresholds:
+        python fast_run.py --agent --calibrate
+"""
+
 import json
 import logging
 from collections import defaultdict
