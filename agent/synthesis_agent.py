@@ -386,7 +386,7 @@ class SynthesisAgent:
             if policy == "privacy_first":
                 return "metadata_only"
             if priority == "high":
-                return "metadata_and_redacted_transcript"
+                return "metadata_plus_redacted_evidence"
             return "metadata_only"
         except Exception:
             return "metadata_only"
@@ -398,7 +398,7 @@ class SynthesisAgent:
     ) -> dict:
         """Build the data export dict based on privacy mode."""
         try:
-            if privacy_mode == "metadata_and_redacted_transcript":
+            if privacy_mode == "metadata_plus_redacted_evidence":
                 return {
                     "raw_audio": False,
                     "transcript": True,

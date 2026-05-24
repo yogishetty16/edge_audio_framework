@@ -342,9 +342,10 @@ class AudioAgent:
                 if t not in task_modules:
                     continue
                 try:
+                    from core.pipeline import _result_to_dict
                     mod = importlib.import_module(task_modules[t])
                     res = mod.analyze(audio)
-                    r = res.__dict__ if hasattr(res, '__dict__') else {}
+                    r = _result_to_dict(res)
                     r["success"] = r.get("success", True)
                     results[t] = r
                 except Exception as ex:

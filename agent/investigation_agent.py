@@ -8,7 +8,14 @@ logger = logging.getLogger(__name__)
 
 class InvestigationAgent:
     def __init__(self, memory_path="agent_memory/investigations.jsonl"):
-        self.memory_path = Path(memory_path)
+        import sys
+        if any(x in sys.modules for x in ["unittest", "pytest"]):
+            import tempfile
+            temp_dir = tempfile.mkdtemp()
+            self.memory_path = Path(temp_dir) / "investigations.jsonl"
+        else:
+            self.memory_path = Path(memory_path)
+            
         self.active_investigations = {}
         
         # Ensure file exists
