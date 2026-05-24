@@ -25,6 +25,11 @@ A modular, offline-first AI framework for real-time audio analysis on headless e
 
 All models are cached inside the project's `models/` folder for full portability.
 
+### Key Enhancements
+
+* **Dynamic VAD Resolver**: Resolves Silero VAD local ONNX directories dynamically (handling both v4 and v5 path structures) to guarantee fully offline, zero-dependency model initialization on both Windows and Linux devices.
+* **Full Multilingual ASR**: Transcribes multilingual speech completely without truncation or size restrictions, mapping ISO 639-1 language codes (e.g., `es` -> `Spanish`, `te` -> `Telugu`) to their full names.
+
 ---
 
 ## Project Structure
@@ -213,15 +218,16 @@ The framework is designed for fully offline operation after initial setup:
 
 ## Agent Decision Engine
 
-When you use `--agent`, the framework runs an advisory AI agent that:
+When you run with `--agent`, the framework deploys an advanced **3-Agent Orchestration Architecture** to reason about parallel task outputs:
 
-- Analyzes the combined output of all tasks
-- Classifies the audio event (normal, environmental, safety incident, etc.)
-- Assigns a priority level (LOW / MEDIUM / HIGH)
-- Recommends a follow-up action
-- Stores events in `agent_memory/events.jsonl` for pattern detection
+1. **Triage Agent** (`agent/triage_agent.py`): Dynamically schedules and filters which tasks to run based on active policy profiles (Balanced, Industrial Safety, Privacy First, Low Power) and recent historical event trends (e.g., repeated noise anomalies, hardware quality degradation).
+2. **Synthesis Agent** (`agent/synthesis_agent.py`): Consumes all raw parallel task results, applies structured Chain-of-Thought (CoT) reasoning, and produces a single unified decision payload (with event classification, priority levels, and detailed operator-facing incident reports).
+3. **Watchdog Agent** (`agent/watchdog_agent.py`): Records decisions in persistent cross-session memory (`agent_memory/events.jsonl`), detects pattern/risk escalations over lookback windows, monitors microphone clipping/SNR, and generates diagnostic watchdog reports.
 
-All processing happens locally. Raw audio never leaves the device — only metadata is stored.
+### Resilience & Fallbacks
+If any agent in the 3-agent orchestration pipeline raises an exception or fails, the orchestrator automatically degrades gracefully to the original deterministic, rule-based decision engine (`agent/audio_agent_rules.py`). This prevents crashes on critical edge deployments.
+
+All processing occurs completely locally on the edge device. No audio or transcript data is transmitted to the cloud.
 
 ---
 

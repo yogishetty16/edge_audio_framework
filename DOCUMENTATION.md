@@ -45,14 +45,17 @@ Every task is a standalone Python module inside the `tasks/` directory. Each tas
 | Property | Value |
 |----------|-------|
 | File | `tasks/vad.py` |
-| Model | Silero VAD v4 |
-| Source | `snakers4/silero-vad` (PyTorch Hub) |
+| Model | Silero VAD v4 / v5 |
+| Source | Local file system (`models/hf_cache` / dynamic resolver) |
 | Size | ~5 MB |
 | Speed | Less than 1 millisecond |
 | Input | Raw audio waveform at 16kHz |
 
 **What it does:**
-Detects whether a human voice is present in the audio window. It outputs a speech ratio (0.0 to 1.0) indicating what percentage of the recording contains speech, and a boolean flag indicating whether speech was detected.
+Detects whether a human voice is present in the audio window. It outputs a speech ratio (0.0 to 1.0) indicating what percentage of the recording contains speech, and a boolean flag indicating whether speech was detected. 
+
+**Local Dynamic Resolution:**
+The task dynamically resolves model search paths on local disk. It automatically adapts to folder structural differences between Silero v4 and v5 ONNX versions, ensuring zero-dependency initialization in restricted, offline air-gapped environments.
 
 **Output fields:**
 - `is_speech` -- True if speech is detected above the threshold
@@ -77,11 +80,11 @@ VAD is the gateway task. If no speech is detected, the agent skips speech-depend
 | Input | Raw audio waveform |
 
 **What it does:**
-Transcribes spoken words into text. Uses OpenAI's Whisper architecture but runs through CTranslate2 with INT8 quantization for maximum speed on CPU-only edge devices.
+Transcribes spoken words into text. Uses OpenAI's Whisper architecture but runs through CTranslate2 with INT8 quantization for maximum speed on CPU-only edge devices. It captures the **complete, un-truncated transcript** and maps language codes (e.g. `es`, `te`) to their full, human-readable language names (e.g. `Spanish`, `Telugu`).
 
 **Output fields:**
-- `text` -- Full transcription of the spoken words
-- `language` -- Detected language code (e.g., "en" for English)
+- `text` -- Complete, un-truncated transcription of the spoken words
+- `language` -- Full name of the detected language (e.g., "Spanish" or "Telugu")
 - `segments` -- Word-level timestamps with confidence scores
 
 **Why it matters:**
@@ -382,18 +385,71 @@ Provides environmental context. Knowing that the background audio is music (and 
 
 ## Agent Decision Engine
 
-The agent (`agent/audio_agent.py`) is a rule-governed decision engine that fuses all task outputs into a single actionable decision. It does NOT use a large language model. It operates purely on deterministic rules and configurable thresholds.
+The agent (`agent/audio_agent.py`) is structured as an advanced **3-Agent Orchestration Architecture** designed for headless edge environments. It divides responsibilities between three specialized agents to achieve highly granular control, context-aware task scheduling, and structured reasoning.
+
+### Agent Architecture
+
+```
+                 +-----------------------+
+                 |     Audio Input       |
+                 +-----------+-----------+
+                             |
+                             v
+                 +-----------------------+
+                 |      TriageAgent      | <---+
+                 | (Task Select/Policy)  |     |
+                 +-----------+-----------+     | Historical Context
+                             |                 | & Alert Trends
+                             v                 |
+                 +-----------------------+     |
+                 |  Parallel Execution   |     |
+                 |  (14 AI/DSP Tasks)    |     |
+                 +-----------+-----------+     |
+                             |                 |
+                             v                 |
+                 +-----------------------+     |
+                 |    SynthesisAgent     |     |
+                 | (CoT / Incident Rep)  |     |
+                 +-----------+-----------+     |
+                             |                 |
+                             v                 |
+                 +-----------------------+     |
+                 |     WatchdogAgent     | ----+
+                 | (Timeline/Trend/Alert)|
+                 +-----------+-----------+
+                             |
+                             v
+                 +-----------------------+
+                 |    Final Decision     |
+                 +-----------------------+
+```
+
+1. **Triage Agent** (`agent/triage_agent.py`):
+   Schedules which tasks to run. Instead of running all 14 heavy AI models continuously (which exhausts edge device resources), it analyzes policy profiles and recent watchdog signals (e.g. repeated anomalies or noise) to select the optimal subset of tasks for the current frame.
+2. **Synthesis Agent** (`agent/synthesis_agent.py`):
+   Aggregates the completed task results. It uses a structured `ReasoningEngine` to apply Chain-of-Thought (CoT) logic, extracts risk signals, estimates decision confidence, and formats a complete operator-facing `incident_report`.
+3. **Watchdog Agent** (`agent/watchdog_agent.py`):
+   Records decisions to local JSONL memory (`agent_memory/events.jsonl`), scans for pattern trends over the lookback window, checks for hardware degradations (microphone clipping, low SNR), raises system-wide alert warnings, and feeds diagnostic `watchdog_report` logs back to the Triage Agent.
+
+### Resilience & Fallbacks
+To guarantee continuous operations on headless edge devices, the orchestrator includes a fail-safe fallback mechanism. If any subagent in the 3-agent pipeline raises an unexpected exception (e.g., file lock issues, model cache corruption, or memory exhaustion), the system catches the error, registers the failure in `task_health`, and immediately falls back to the deterministic, rule-based decision engine (`agent/audio_agent_rules.py`).
+
+---
 
 ### Decision Flow
 
+The Synthesis Agent runs a multi-step decision pipeline:
+
 ```
-Step 1: Extract Signals
-    Read outputs from all completed tasks.
+Step 1: Build Context
+    Extract raw parameters (speech ratios, SNR, language names, class scores).
+
+Step 2: Extract Signals
     Compute: speech_detected, low_quality, anomaly, impulse,
              stress_emotion, alert_keyword, transcript_alert,
              esc_event
 
-Step 2: Classify Event
+Step 3: Classify Event
     Based on signal combinations:
     - 2+ risk signals        --> "possible_safety_incident" (HIGH)
     - Impulse event detected  --> "possible_impulse_threat" (HIGH)
@@ -403,24 +459,18 @@ Step 2: Classify Event
     - Environmental sound     --> "environmental_audio_event" (LOW)
     - Nothing notable         --> "normal_audio" (LOW)
 
-Step 3: Estimate Confidence
-    Start at 0.35 base score.
-    Add points for: successful tasks, speech detection, transcripts,
-                    ESC events, stress emotions, risk signals.
-    Subtract points for: low audio quality.
-    Final range: 0.00 to 0.98.
+Step 4: Build Reasoning Chain
+    Construct Chain-of-Thought reasoning steps explaining the decision.
 
-Step 4: Privacy Decision
-    LOW/MEDIUM events  --> metadata only (no raw audio exported)
-    HIGH events        --> metadata + redacted transcript
-    Privacy-first mode --> never export raw audio
+Step 5: Estimate Confidence
+    Compute a confidence score (0.00 to 0.98) based on task successes,
+    speech detection, stress levels, and audio quality.
 
-Step 5: Recommend Action
-    HIGH   --> "create_incident_and_notify_operator"
-    MEDIUM --> "store_metadata_and_request_review"
-             or "extract_intent_and_route_to_workflow"
-    LOW    --> "ignore_or_continue_monitoring"
-             or "log_event"
+Step 6: Build Incident Report
+    Generate an operator-facing text summary detailing the event structure.
+
+Step 7: Privacy & Export Policies
+    Verify output levels based on the active profile and redact transcripts as needed.
 ```
 
 ### Risk Signal List
@@ -436,43 +486,39 @@ The agent tracks these risk signals:
 | `alert_keyword` | Keyword like "stop", "help", "fire" detected above 50% |
 | `transcript_alert` | Transcript contains explicit safety/distress language |
 | `alert_sound` | ESC detects alarm, siren, gunshot, glass breaking, etc. |
-| `timeline_escalation` | Memory system detects repeated risk pattern |
+| `timeline_escalation` | Memory system/Watchdog detects repeated risk pattern |
 
 ---
 
 ## Agent Policies
 
-The agent supports four pre-built policy profiles:
+The system supports four pre-built policy profiles, which configure the **Triage Agent**'s selection process and determine privacy/export limits:
 
 ### Balanced (Default)
 
-- Always runs: VAD, audio quality, anomaly detection, impulse detection
-- On speech: follows up with ASR and emotion
-- On no speech: follows up with ESC
-- On high risk: follows up with ESC, keyword spotting, speaker ID
-- Max parallel tasks: 6
+- **Initial Triage**: Always runs VAD, audio quality, anomaly detection, and impulse detection (lightweight/DSP tasks).
+- **Follow-up scheduling**: On speech detection, schedules ASR and emotion. On high risk, schedules ESC, keyword spotting, and speaker ID.
+- **Max parallel tasks**: 6.
 
 ### Industrial Safety
 
-- Same as balanced but adds ESC to the always-on list
-- Lower thresholds for ESC alerts (0.20) and stress detection (0.40)
-- On speech: adds keyword spotting to follow-up
-- Designed for factory floors and hazardous environments
+- **Initial Triage**: Adds environmental sound classification (ESC) to the always-on list.
+- **Sensitivity thresholds**: Lower thresholds for ESC alerts (0.20 instead of 0.25) and stress detection (0.40 instead of 0.45).
+- **Follow-up scheduling**: On speech detection, adds keyword spotting.
+- **Designed for**: Factory floors and hazardous workspaces.
 
 ### Privacy First
 
-- Minimal task set: VAD, audio quality, anomaly, impulse
-- On speech: only ASR (no emotion, no speaker ID)
-- Raw audio export permanently disabled
-- Max parallel tasks: 4
-- Designed for GDPR-compliant deployments
+- **Initial Triage**: Minimal task set: VAD, audio quality, anomaly, and impulse.
+- **Follow-up scheduling**: On speech, runs only ASR (no emotion, no speaker ID).
+- **Data protection**: Raw audio exports are permanently disabled. Transcripts are redacted and only exported for HIGH priority incidents.
+- **Designed for**: GDPR-compliant corporate office areas.
 
 ### Low Power
 
-- Smallest task set: VAD, audio quality, impulse
-- Skips anomaly detection from always-on (runs only as follow-up)
-- Max parallel tasks: 3
-- Designed for battery-powered or Raspberry Pi devices
+- **Initial Triage**: Smallest task set: VAD, audio quality, and impulse. Skips anomaly detection.
+- **Follow-up scheduling**: Runs heavier tasks only if VAD speech ratio is high or an impulse event is triggered.
+- **Designed for**: Battery-powered edge endpoints or Raspberry Pi devices.
 
 ---
 
