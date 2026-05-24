@@ -360,6 +360,73 @@ def print_agent_decision(decision, show_json=False):
 
     print(f"  Models used  : {', '.join(_humanize_token(x) for x in payload['models_used'])}")
 
+    # [CALIBRATION] print block
+    from pathlib import Path
+    meta = payload.get("metadata", {})
+    cal_status = meta.get("calibration_status", "uncalibrated")
+    
+    print("\n[CALIBRATION]")
+    if cal_status == "calibrated":
+        env = meta.get("environment_type", "unknown")
+        cal_path = Path("agent_memory/calibration.json")
+        time_ago = "unknown time"
+        thresholds_str = ""
+        if cal_path.exists():
+            try:
+                with open(cal_path, "r", encoding="utf-8") as f:
+                    c_data = json.load(f)
+                cat = c_data.get("calibrated_at")
+                if cat:
+                    from datetime import datetime, timezone
+                    t_dt = datetime.fromisoformat(cat)
+                    diff = datetime.now(timezone.utc) - t_dt
+                    sec = diff.total_seconds()
+                    if sec < 60:
+                        time_ago = f"{int(sec)}s ago"
+                    elif sec < 3600:
+                        time_ago = f"{int(sec//60)}m ago"
+                    else:
+                        time_ago = f"{int(sec//3600)}h ago"
+                t_vals = c_data.get("thresholds", {})
+                thresholds_str = f"speech={t_vals.get('speech_ratio_threshold', 0.30):.2f} | anomaly={t_vals.get('anomaly_score_threshold', -0.40):.2f} | snr={t_vals.get('snr_alert_threshold', 8.0):.1f}dB"
+            except Exception:
+                pass
+        print(f"  Environment  : {env}")
+        print(f"  Status       : Calibrated {time_ago}")
+        print(f"  Thresholds   : {thresholds_str}")
+    else:
+        print("  Environment  : N/A")
+        print("  Status       : Uncalibrated (defaults)")
+        print("  Thresholds   : speech=0.30 | anomaly=-0.40 | snr=8.0dB")
+
+    # [INVESTIGATION] print block
+    active_invs = meta.get("active_investigations", [])
+    verdict_data = meta.get("investigation_verdict")
+    opened_id = meta.get("investigation_id")
+    
+    if active_invs or verdict_data or opened_id:
+        print("\n[INVESTIGATION]")
+        if opened_id:
+            print(f"  Status       : Opened #{opened_id[:8]}")
+        elif verdict_data:
+            v = str(verdict_data.get("verdict", "unknown")).upper()
+            print(f"  Status       : Verdict reached: {v}")
+        else:
+            short_id = active_invs[0].split(" ")[0].replace("#", "") if active_invs else "unknown"
+            print(f"  Status       : Active (#{short_id})")
+            
+        if verdict_data:
+            fu_list = []
+            for fu in verdict_data.get("follow_ups", []):
+                offset = fu.get("scheduled_at_offset_seconds")
+                present = fu.get("comparison", {}).get("threat_still_present")
+                status_str = "threat present" if present else "clear"
+                fu_list.append(f"+{offset}s: {status_str}")
+            print(f"  Timeline     : {' | '.join(fu_list)}")
+            print(f"  Verdict      : {verdict_data.get('verdict_reasoning')}")
+        elif active_invs:
+            print(f"  Timeline     : {active_invs[0]}")
+
     if show_json:
         print("\n  Structured output:")
         print(json.dumps(payload, indent=2))
@@ -504,12 +571,88 @@ def main():
                         help="Clear persistent agent timeline memory and exit")
     parser.add_argument("--quick", action="store_true",
                         help="Fast startup mode: skip prewarm and run only essential lightweight tasks")
+    parser.add_argument("--calibrate", action="store_true",
+                        help="Record ambient baseline and calibrate thresholds")
+    parser.add_argument("--investigations", action="store_true",
+                        help="Print a formatted report of all investigations and exit")
     args = parser.parse_args()
 
     if args.clear_agent_memory:
         memory = AudioMemory(args.agent_memory_path)
         memory.clear()
         print(f"Cleared agent memory: {memory.path}")
+        return
+
+    from pathlib import Path
+    if args.investigations:
+        from agent.investigation_agent import InvestigationAgent
+        inv_path = "agent_memory/investigations.jsonl"
+        if args.agent_memory_path:
+            inv_path = str(Path(args.agent_memory_path).parent / "investigations.jsonl")
+        inv_agent = InvestigationAgent(inv_path)
+        path = Path(inv_agent.memory_path)
+        if not path.exists():
+            print("No investigations found.")
+            return
+        
+        investigations = {}
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    iid = data.get("investigation_id")
+                    if iid:
+                        investigations[iid] = data
+                except Exception:
+                    continue
+                    
+        if not investigations:
+            print("No investigations found.")
+            return
+            
+        print("\n=======================================================")
+        print("  HISTORICAL & ACTIVE INVESTIGATIONS")
+        print("=======================================================")
+        
+        active = [i for i in investigations.values() if i.get("status") == "active"]
+        completed = [i for i in investigations.values() if i.get("status") == "completed"]
+        
+        if active:
+            print("\n  ACTIVE INVESTIGATIONS:")
+            for inv in active:
+                short_id = inv["investigation_id"][:8]
+                event = inv["triggered_by"].get("event_type", "unknown")
+                done = sum(1 for f in inv["follow_ups"] if f.get("recorded_at") is not None)
+                print(f"    - #{short_id}: {event} (Progress: {done}/3 follow-ups)")
+         
+        if completed:
+            print("\n  COMPLETED INVESTIGATIONS:")
+            for inv in completed:
+                short_id = inv["investigation_id"][:8]
+                event = inv["triggered_by"].get("event_type", "unknown")
+                verdict = str(inv.get("verdict", "unknown")).upper()
+                
+                try:
+                    from datetime import datetime
+                    t_dt = datetime.fromisoformat(inv["triggered_at"])
+                    c_dt = datetime.fromisoformat(inv["completed_at"])
+                    duration = int((c_dt - t_dt).total_seconds())
+                    dur_str = f"{duration}s"
+                except Exception:
+                    dur_str = "unknown duration"
+                     
+                print(f"    - #{short_id}: {event} -> {verdict} (Duration: {dur_str})")
+                print(f"      Reasoning: {inv.get('verdict_reasoning')}")
+                print(f"      Timeline : {inv.get('timeline_summary')}")
+        print("=======================================================\n")
+        return
+
+    if args.calibrate:
+        duration = args.duration if ("--duration" in sys.argv or "-d" in sys.argv) else 10
+        waveform, sr = record_audio(duration_sec=duration, device_index=args.device)
+        agent = AudioAgent(args.agent_profile)
+        report = agent.run_calibration(waveform, sr)
+        print(json.dumps(report, indent=2))
         return
 
     if args.list_devices:
@@ -542,6 +685,33 @@ def main():
     print("  Edge Audio Framework — FAST MODE")
     print("  [Tasks run in PARALLEL]")
     print("="*55)
+
+    # Startup calibration check
+    cal_path = Path("agent_memory/calibration.json")
+    if cal_path.exists():
+        try:
+            with open(cal_path, "r", encoding="utf-8") as f:
+                cal_data = json.load(f)
+            env = cal_data.get("environment_type", "unknown")
+            cat = cal_data.get("calibrated_at")
+            if cat:
+                from datetime import datetime, timezone
+                t_dt = datetime.fromisoformat(cat)
+                diff = datetime.now(timezone.utc) - t_dt
+                sec = diff.total_seconds()
+                if sec < 60:
+                    time_ago = f"{int(sec)}s ago"
+                elif sec < 3600:
+                    time_ago = f"{int(sec//60)}m ago"
+                else:
+                    time_ago = f"{int(sec//3600)}h ago"
+            else:
+                time_ago = "unknown time"
+            print(f"[CALIBRATION] Loaded: {env} environment, calibrated {time_ago}")
+        except Exception:
+            print("[CALIBRATION] No calibration found. Run with --calibrate for environment-specific thresholds.")
+    else:
+        print("[CALIBRATION] No calibration found. Run with --calibrate for environment-specific thresholds.")
     print(f"  Duration : {args.duration}s")
     print(f"  Tasks    : {', '.join(task_list)}")
     if agent:

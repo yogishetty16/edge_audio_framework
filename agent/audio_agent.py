@@ -38,6 +38,8 @@ from .policy import get_policy
 from .triage_agent import TriageAgent
 from .synthesis_agent import SynthesisAgent
 from .watchdog_agent import WatchdogAgent
+from .calibration_agent import CalibrationAgent
+from .investigation_agent import InvestigationAgent
 
 # ── fallback rule engine ─────────────────────────────────────────────
 from . import audio_agent_rules as _rules
@@ -86,6 +88,8 @@ class AudioAgent:
         self._triage = TriageAgent()
         self._synthesis = SynthesisAgent()
         self._watchdog = WatchdogAgent()
+        self.calibration_agent = CalibrationAgent()
+        self.investigation_agent = InvestigationAgent()
 
         # Track the active policy name for the synthesis agent
         self._policy_name = self.policy.name
@@ -159,27 +163,36 @@ class AudioAgent:
     # ── main decision pipeline ───────────────────────────────────────
 
     def decide(self, results: Dict[str, Dict[str, Any]]) -> AgentDecision:
-        """Create one actionable decision from task outputs.
+        """Create one actionable decision from task outputs."""
+        # BEFORE running normal analysis: check due follow-ups
+        completed_verdict = None
+        try:
+            due_followups = self.investigation_agent.check_due_followups()
+            for due in due_followups:
+                task_results = self._run_followup_tasks(due["investigation_id"])
+                thresholds = self.calibration_agent.get_thresholds()
+                try:
+                    fu_memory = self._watchdog.get_memory_context()
+                except Exception:
+                    fu_memory = {"recent_events": [], "watchdog_report": None}
+                
+                fu_decision_dict = self._synthesis.synthesize(
+                    task_results, fu_memory, self._policy_name, thresholds=thresholds
+                )
+                
+                self.investigation_agent.record_followup(
+                    due["investigation_id"],
+                    due["follow_up_index"],
+                    task_results,
+                    fu_decision_dict
+                )
+                
+                report = self.investigation_agent.get_investigation_report(due["investigation_id"])
+                if report and report.get("status") == "completed":
+                    completed_verdict = report
+        except Exception as e:
+            logger.warning("Investigation follow-up check failed: %s", e)
 
-        Pipeline
-        --------
-        1. Fetch memory context from WatchdogAgent.
-        2. Run SynthesisAgent to produce a full decision dict.
-        3. On ANY exception, fall back to ``audio_agent_rules.py``.
-        4. Record the event in WatchdogAgent.
-        5. If a watchdog report is returned, attach it.
-        6. Return the final ``AgentDecision``.
-
-        Parameters
-        ----------
-        results : dict
-            Raw task outputs keyed by task name.
-
-        Returns
-        -------
-        AgentDecision
-            Dataclass instance with all schema fields populated.
-        """
         # Step 1: memory context
         try:
             memory_context = self._watchdog.get_memory_context()
@@ -203,7 +216,8 @@ class AudioAgent:
                 memory_context["triage_explanation"] = "Triage explanation unavailable."
 
             decision_dict = self._synthesis.synthesize(
-                results, memory_context, self._policy_name
+                results, memory_context, self._policy_name,
+                thresholds=self.calibration_agent.get_thresholds()
             )
 
         except Exception as exc:
@@ -257,7 +271,109 @@ class AudioAgent:
             decision_dict["watchdog_report"] = watchdog_report
 
         # Step 6: convert to AgentDecision dataclass
-        return _dict_to_decision(decision_dict)
+        decision = _dict_to_decision(decision_dict)
+
+        # Update thresholds
+        try:
+            self.calibration_agent.update_thresholds(decision.to_dict())
+        except Exception as e:
+            logger.warning("Failed to update thresholds: %s", e)
+
+        # Check if we should investigate
+        opened_id = None
+        try:
+            if self.investigation_agent.should_investigate(decision.to_dict()):
+                opened_id = self.investigation_agent.open_investigation(decision.to_dict())
+        except Exception as e:
+            logger.warning("Failed to check or open investigation: %s", e)
+
+        # Attach metadata
+        try:
+            decision.metadata["calibration_status"] = "calibrated" if self.calibration_agent.is_calibrated else "uncalibrated"
+            if self.calibration_agent.is_calibrated:
+                decision.metadata["environment_type"] = self.calibration_agent.environment_type
+            
+            decision.metadata["investigation_id"] = opened_id
+            decision.metadata["active_investigations"] = self.investigation_agent.get_active_summary()
+            decision.metadata["investigation_verdict"] = completed_verdict
+        except Exception as e:
+            logger.warning("Failed to attach investigation metadata: %s", e)
+
+        return decision
+
+    def run_calibration(self, waveform, sr) -> dict:
+        """Expose self-calibration capability publicly."""
+        report = self.calibration_agent.calibrate(waveform, sr)
+        print(self.calibration_agent.get_calibration_summary())
+        return report
+
+    def _run_followup_tasks(self, investigation_id: str) -> dict:
+        try:
+            report = self.investigation_agent.get_investigation_report(investigation_id)
+            if not report:
+                return {}
+            trigger = report.get("triggered_by", {})
+            models_used = trigger.get("models_used", [])
+            if not models_used:
+                models_used = ["vad", "asr", "audio_quality_monitoring"]
+            
+            waveform, sr = self._record_audio_clip(duration=5)
+            
+            from core.audio_io import AudioData
+            import importlib
+            audio = AudioData(waveform=waveform, sample_rate=sr, duration_sec=len(waveform)/sr, n_channels=1)
+            
+            task_modules = {
+                "vad": "tasks.vad", "asr": "tasks.asr",
+                "keyword_spotting": "tasks.keyword_spotting",
+                "speaker_id": "tasks.speaker_id", "emotion": "tasks.emotion",
+                "speech_quality": "tasks.speech_quality",
+                "lang_accent_id": "tasks.accent_lang_id", "esc": "tasks.esc",
+                "acoustic_event_detection": "tasks.acoustic_event_detection",
+                "audio_quality_monitoring": "tasks.audio_quality_monitor",
+                "music_speech_detection": "tasks.music_speech_detection",
+                "anomaly_detection": "tasks.anomaly_detection",
+                "impulse_event": "tasks.impulse_event",
+                "music_genre": "tasks.music_genre",
+            }
+            
+            results = {}
+            for t in models_used:
+                if t not in task_modules:
+                    continue
+                try:
+                    mod = importlib.import_module(task_modules[t])
+                    res = mod.analyze(audio)
+                    r = res.__dict__ if hasattr(res, '__dict__') else {}
+                    r["success"] = r.get("success", True)
+                    results[t] = r
+                except Exception as ex:
+                    results[t] = {"success": False, "error": str(ex)}
+            return results
+        except Exception as e:
+            logger.warning("Failed to run follow-up tasks: %s", e)
+            return {}
+
+    def _record_audio_clip(self, duration=5):
+        try:
+            import pyaudio
+            import numpy as np
+            pa = pyaudio.PyAudio()
+            chunk = 1024
+            stream = pa.open(rate=16000, channels=1, format=pyaudio.paFloat32,
+                             input=True, frames_per_buffer=chunk)
+            frames = []
+            for _ in range(int(16000 / chunk * duration)):
+                frames.append(stream.read(chunk, exception_on_overflow=False))
+            stream.stop_stream()
+            stream.close()
+            pa.terminate()
+            data = np.frombuffer(b"".join(frames), dtype=np.float32)
+            return data, 16000
+        except Exception as e:
+            logger.warning("Microphone recording failed for follow-up: %s", e)
+            import numpy as np
+            return np.zeros(16000 * duration, dtype=np.float32), 16000
 
 
 # ── helpers ──────────────────────────────────────────────────────────

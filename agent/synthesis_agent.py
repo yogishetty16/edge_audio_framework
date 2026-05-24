@@ -37,6 +37,7 @@ class SynthesisAgent:
         task_results: dict,
         memory_context: dict,
         policy: str = "balanced",
+        thresholds: dict = None,
     ) -> dict:
         """Produce a complete AgentDecision dict from task outputs.
 
@@ -64,7 +65,7 @@ class SynthesisAgent:
             context = self.engine.build_context(task_results)
 
             # Step 2: extract risk signals (same logic as audio_agent_rules.py)
-            signals = self._extract_signals(task_results)
+            signals = self._extract_signals(task_results, thresholds=thresholds)
             risk_signals = self._collect_risk_signals(signals)
 
             # Step 3: classify event
@@ -162,11 +163,11 @@ class SynthesisAgent:
 
     # ── signal extraction (mirrors audio_agent_rules.py) ─────────────
 
-    def _extract_signals(self, results: dict) -> dict:
+    def _extract_signals(self, results: dict, thresholds: dict = None) -> dict:
         """Replicate the signal extraction from the original rule engine.
 
         All thresholds are identical to ``AudioAgent._extract_signals``
-        in ``audio_agent_rules.py``.
+        in ``audio_agent_rules.py``, unless dynamic thresholds are passed.
         """
         try:
             vad = results.get("vad", {}) or {}
@@ -183,9 +184,10 @@ class SynthesisAgent:
             esc_score = _num(esc.get("top_score", 0.0))
             transcript = str(asr.get("text", "") or "").strip()
 
+            speech_ratio_threshold = thresholds.get("speech_ratio_threshold", 0.05) if thresholds else 0.05
             speech_by_vad = bool(
                 vad.get("is_speech", vad.get("is_speaking", False))
-                or speech_ratio >= 0.05  # policy.min_speech_ratio default
+                or speech_ratio >= speech_ratio_threshold
             )
             speech_by_esc = (
                 _looks_like_speech_sound(esc_label)
@@ -205,8 +207,9 @@ class SynthesisAgent:
 
             quality_label = str(quality.get("quality_label", "") or "").lower()
             snr_db = _num(quality.get("snr_db", 0.0))
+            snr_alert_threshold = thresholds.get("snr_alert_threshold", 8.0) if thresholds else 8.0
             low_quality = quality_label in ("poor",) or (
-                quality_label != "" and snr_db < 8.0
+                quality_label != "" and snr_db < snr_alert_threshold
             )
 
             emotion_label = str(emotion.get("top_emotion", "") or "").lower()
@@ -232,9 +235,10 @@ class SynthesisAgent:
             esc_event = bool(esc_label and esc_score >= 0.25)
 
             anomaly_score = _num(anomaly.get("anomaly_score", 0.0))
+            anomaly_score_threshold = thresholds.get("anomaly_score_threshold", -0.10) if thresholds else -0.10
             raw_anomaly_flag = bool(
                 anomaly.get("is_anomaly", False)
-                or anomaly_score < -0.10
+                or anomaly_score < anomaly_score_threshold
             )
             benign_speech_context = (
                 raw_anomaly_flag
