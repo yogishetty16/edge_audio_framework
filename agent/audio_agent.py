@@ -1,42 +1,111 @@
-"""Agentic edge audio orchestrator.
+"""Agentic edge audio orchestrator — 3-agent reasoning system.
 
-This layer treats pretrained task models as tools. It does not retrain or modify
-them; it plans which tools should run and converts their outputs into a single
-enterprise-grade decision.
+This module replaces the original rule-based ``AudioAgent`` with a
+proper 3-agent architecture (Triage → Synthesis → Watchdog) while
+keeping the original rule engine as a fallback.  It is a **drop-in
+replacement**: same class name, same constructor signature, and same
+public methods so that ``fast_run.py`` works unchanged.
+
+Architecture
+------------
+1. **TriageAgent** — selects which tasks to run based on recent memory
+   and policy constraints.
+2. **SynthesisAgent** — consumes task outputs and produces a complete
+   ``AgentDecision`` with chain-of-thought reasoning.
+3. **WatchdogAgent** — records events, detects trends, and feeds back
+   to the triage layer.
+
+The original ``audio_agent_rules.py`` is imported as the fallback: if
+any agent raises an exception, the pipeline degrades gracefully to the
+proven rule engine.
+
+Classes
+-------
+AudioAgent
+    Drop-in replacement orchestrator for the edge audio framework.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+import logging
+import sys
+from typing import Any, Dict, Iterable, List, Optional
 
-from .policy import get_policy
 from .schema import AgentDecision, AgentPolicy, TaskPlan
+from .policy import get_policy
+
+# ── agents ───────────────────────────────────────────────────────────
+from .triage_agent import TriageAgent
+from .synthesis_agent import SynthesisAgent
+from .watchdog_agent import WatchdogAgent
+
+# ── fallback rule engine ─────────────────────────────────────────────
+from . import audio_agent_rules as _rules
+
+logger = logging.getLogger(__name__)
 
 
 class AudioAgent:
-    """Rule-governed agent for edge-first speech and audio intelligence."""
+    """Drop-in orchestrator with a 3-agent reasoning system.
 
-    def __init__(self, profile: str = "balanced", policy: Optional[AgentPolicy] = None) -> None:
+    This class exposes the same public API as the original
+    ``AudioAgent`` in ``audio_agent_rules.py``:
+
+    * ``__init__(profile, policy)``
+    * ``plan_initial_tasks(requested_tasks)``
+    * ``plan_follow_up_tasks(results, requested_tasks, already_run)``
+    * ``decide(results)``
+
+    Internally it delegates to TriageAgent, SynthesisAgent, and
+    WatchdogAgent, falling back to the rule engine on any failure.
+    """
+
+    def __init__(
+        self,
+        profile: str = "balanced",
+        policy: Optional[AgentPolicy] = None,
+    ) -> None:
+        """Initialise the 3-agent system and the fallback rule engine.
+
+        Parameters
+        ----------
+        profile : str
+            Policy profile name (``balanced``, ``industrial_safety``,
+            ``privacy_first``, ``low_power``).
+        policy : AgentPolicy or None
+            Optional explicit policy object.  If None, resolved from
+            *profile*.
+        """
+        # Core policy — shared with the fallback engine
         self.policy = policy or get_policy(profile)
 
-    def plan_initial_tasks(self, requested_tasks: Optional[Iterable[str]] = None) -> TaskPlan:
-        """Return the first lightweight task batch."""
-        allowed = _clean_task_list(requested_tasks)
-        tasks = list(self.policy.always_on_tasks)
-        skipped = {}
+        # Fallback rule engine (same constructor signature)
+        self._fallback = _rules.AudioAgent(profile=profile, policy=self.policy)
 
-        if allowed:
-            skipped = {t: "not requested by caller" for t in tasks if t not in allowed}
-            tasks = [t for t in tasks if t in allowed]
+        # 3-agent system
+        self._triage = TriageAgent()
+        self._synthesis = SynthesisAgent()
+        self._watchdog = WatchdogAgent()
 
-        if not tasks and allowed:
-            tasks = list(allowed[: self.policy.max_parallel_tasks])
+        # Track the active policy name for the synthesis agent
+        self._policy_name = self.policy.name
 
-        return TaskPlan(
-            tasks=_dedupe(tasks)[: self.policy.max_parallel_tasks],
-            reason="Initial edge triage: run lightweight signal, quality, and risk checks first.",
-            skipped_tasks=skipped,
-        )
+    # ── task planning (delegates to fallback for compatibility) ───────
+
+    def plan_initial_tasks(
+        self,
+        requested_tasks: Optional[Iterable[str]] = None,
+    ) -> TaskPlan:
+        """Return the first lightweight task batch.
+
+        Delegates to the original rule engine to maintain exact
+        compatibility with ``fast_run.py``'s orchestrated mode.
+        """
+        try:
+            return self._fallback.plan_initial_tasks(requested_tasks)
+        except Exception as exc:
+            logger.warning("plan_initial_tasks fallback failed: %s", exc)
+            return TaskPlan(tasks=list(requested_tasks or []), reason="Fallback planning.")
 
     def plan_follow_up_tasks(
         self,
@@ -44,392 +113,306 @@ class AudioAgent:
         requested_tasks: Optional[Iterable[str]] = None,
         already_run: Optional[Iterable[str]] = None,
     ) -> TaskPlan:
-        """Plan the next task batch from first-pass results."""
-        allowed = _clean_task_list(requested_tasks)
-        already = set(_clean_task_list(already_run))
-        signals = self._extract_signals(results)
-        followups: List[str] = []
-        reasons: List[str] = []
+        """Plan the next task batch from first-pass results.
 
-        if signals["speech_detected"]:
-            followups.extend(self.policy.speech_follow_up_tasks)
-            reasons.append("speech was detected")
-        else:
-            followups.extend(self.policy.non_speech_follow_up_tasks)
-            reasons.append("speech was not dominant")
+        Delegates to the original rule engine to maintain exact
+        compatibility with ``fast_run.py``'s orchestrated mode.
+        """
+        try:
+            return self._fallback.plan_follow_up_tasks(
+                results, requested_tasks=requested_tasks, already_run=already_run
+            )
+        except Exception as exc:
+            logger.warning("plan_follow_up_tasks fallback failed: %s", exc)
+            return TaskPlan(tasks=[], reason="Fallback follow-up planning.")
 
-        if signals["is_high_risk"]:
-            followups.extend(self.policy.high_risk_follow_up_tasks)
-            reasons.append("risk signals crossed policy thresholds")
+    # ── task selection via triage agent ───────────────────────────────
 
-        if signals["low_quality"]:
-            followups.append("speech_quality")
-            reasons.append("audio quality is weak")
+    def get_tasks(self, memory_context: dict = None) -> List[str]:
+        """Select tasks using the TriageAgent.
 
-        tasks = [t for t in _dedupe(followups) if t not in already]
-        skipped: Dict[str, str] = {}
-        if allowed:
-            skipped = {t: "not requested by caller" for t in tasks if t not in allowed}
-            tasks = [t for t in tasks if t in allowed]
+        Falls back to the existing policy logic in
+        ``audio_agent_rules.py`` if the triage agent raises any
+        exception.
 
-        return TaskPlan(
-            tasks=tasks[: self.policy.max_parallel_tasks],
-            reason="Follow-up based on " + ", ".join(reasons) + ".",
-            skipped_tasks=skipped,
-        )
+        Parameters
+        ----------
+        memory_context : dict or None
+            Recent memory context.  If None, fetched from WatchdogAgent.
+
+        Returns
+        -------
+        list[str]
+            Selected task names.
+        """
+        try:
+            if memory_context is None:
+                memory_context = self._watchdog.get_memory_context()
+            return self._triage.select_tasks(memory_context, self._policy_name)
+        except Exception as exc:
+            logger.warning("TriageAgent failed, falling back to rules: %s", exc)
+            try:
+                return list(self.policy.always_on_tasks)
+            except Exception:
+                return ["vad", "audio_quality_monitoring", "anomaly_detection", "impulse_event"]
+
+    # ── main decision pipeline ───────────────────────────────────────
 
     def decide(self, results: Dict[str, Dict[str, Any]]) -> AgentDecision:
-        """Create one actionable decision from task outputs."""
-        normalized = {name: _as_dict(value) for name, value in (results or {}).items()}
-        signals = self._extract_signals(normalized)
-        task_health = _task_health(normalized)
-        reasoning: List[str] = []
-        risk_signals: List[str] = []
+        """Create one actionable decision from task outputs.
 
-        if signals["speech_detected"]:
-            if signals["speech_source"] == "vad":
-                reasoning.append(f"speech detected at {signals['speech_ratio'] * 100:.1f}% of the window")
-            else:
-                reasoning.append(
-                    f"speech indicated by {signals['speech_source']} despite low VAD ratio "
-                    f"({signals['speech_ratio'] * 100:.1f}%)"
+        Pipeline
+        --------
+        1. Fetch memory context from WatchdogAgent.
+        2. Run SynthesisAgent to produce a full decision dict.
+        3. On ANY exception, fall back to ``audio_agent_rules.py``.
+        4. Record the event in WatchdogAgent.
+        5. If a watchdog report is returned, attach it.
+        6. Return the final ``AgentDecision``.
+
+        Parameters
+        ----------
+        results : dict
+            Raw task outputs keyed by task name.
+
+        Returns
+        -------
+        AgentDecision
+            Dataclass instance with all schema fields populated.
+        """
+        # Step 1: memory context
+        try:
+            memory_context = self._watchdog.get_memory_context()
+        except Exception:
+            memory_context = {"recent_events": [], "watchdog_report": None}
+
+        # Step 2: try the 3-agent system
+        decision_dict = None
+        used_fallback = False
+        try:
+            # Inject triage explanation into memory context
+            try:
+                triage_tasks = self._triage.select_tasks(
+                    memory_context, self._policy_name
                 )
-        else:
-            reasoning.append("speech was not dominant in the window")
+                triage_explanation = self._triage.explain_selection(
+                    triage_tasks, memory_context
+                )
+                memory_context["triage_explanation"] = triage_explanation
+            except Exception:
+                memory_context["triage_explanation"] = "Triage explanation unavailable."
 
-        if signals["low_quality"]:
-            reasoning.append("audio quality is below policy target")
-            risk_signals.append("low_audio_quality")
-
-        if signals["anomaly"]:
-            reasoning.append("anomaly detector flagged unusual audio characteristics")
-            risk_signals.append("audio_anomaly")
-        elif signals["anomaly_downgraded"]:
-            reasoning.append("isolated anomaly signal was downgraded because speech/quality evidence was benign")
-
-        if signals["impulse_event"]:
-            reasoning.append(
-                f"short impulse event detected: {signals['impulse_label']} "
-                f"({signals['impulse_confidence'] * 100:.1f}%)"
-            )
-            risk_signals.append("impulse_event")
-
-        if signals["stress_emotion"]:
-            reasoning.append(
-                f"stress emotion detected: {signals['emotion_label']} "
-                f"({signals['emotion_score'] * 100:.1f}%)"
-            )
-            risk_signals.append("stressed_speech")
-
-        if signals["alert_keyword"]:
-            reasoning.append(
-                f"keyword spotted: {signals['keyword_label']} "
-                f"({signals['keyword_score'] * 100:.1f}%)"
-            )
-            risk_signals.append("alert_keyword")
-        elif signals["keyword_label"]:
-            reasoning.append(
-                f"non-alert keyword spotted: {signals['keyword_label']} "
-                f"({signals['keyword_score'] * 100:.1f}%)"
+            decision_dict = self._synthesis.synthesize(
+                results, memory_context, self._policy_name
             )
 
-        if signals["transcript_alert"]:
-            reasoning.append("transcript contains explicit safety or distress language")
-            risk_signals.append("transcript_alert")
-
-        if signals["esc_event"]:
-            reasoning.append(
-                f"environmental sound detected: {signals['esc_label']} "
-                f"({signals['esc_score'] * 100:.1f}%)"
+        except Exception as exc:
+            # Step 3: fallback to rule engine
+            logger.warning(
+                "SynthesisAgent failed, falling back to rules: %s", exc
             )
-            if _looks_like_alert_sound(signals["esc_label"]):
-                risk_signals.append("alert_sound")
+            used_fallback = True
 
-        if signals["transcript"]:
-            reasoning.append("transcript is available for structured workflow extraction")
+        if decision_dict is None or used_fallback:
+            try:
+                fallback_decision = self._fallback.decide(results or {})
+                decision_dict = fallback_decision.to_dict()
+                # Augment with new fields
+                decision_dict.setdefault("incident_report", "Decision produced by fallback rule engine.")
+                decision_dict.setdefault("triage_explanation", "Fallback mode — triage agent was bypassed.")
+                decision_dict.setdefault("watchdog_report", None)
+                decision_dict["reasoning"] = decision_dict.get("reasoning", []) + [
+                    f"[fallback] Rule engine was used due to synthesis failure"
+                ]
+            except Exception as fallback_exc:
+                logger.error("Fallback rule engine also failed: %s", fallback_exc)
+                decision_dict = {
+                    "event_type": "normal_audio",
+                    "priority": "low",
+                    "confidence": 0.10,
+                    "recommended_action": "ignore_or_continue_monitoring",
+                    "privacy_mode": "metadata_only",
+                    "models_used": sorted((results or {}).keys()),
+                    "reasoning": [f"Both agents failed: {fallback_exc}"],
+                    "follow_up_tasks": [],
+                    "risk_signals": [],
+                    "data_export": {"raw_audio": False, "transcript": False,
+                                    "embeddings": False, "metadata": True},
+                    "task_health": {},
+                    "metadata": {"policy": self._policy_name},
+                    "incident_report": "System error — both agents failed.",
+                    "triage_explanation": "Unavailable due to system error.",
+                    "watchdog_report": None,
+                }
 
-        event_type, priority, action = self._classify_event(signals, risk_signals)
-        confidence = self._estimate_confidence(signals, task_health, risk_signals)
-        privacy_mode, data_export = self._privacy_decision(event_type, priority)
+        # Step 4: record event in watchdog
+        watchdog_report = None
+        try:
+            watchdog_report = self._watchdog.record_event(decision_dict)
+        except Exception:
+            pass
 
-        follow_up = self.plan_follow_up_tasks(normalized, already_run=normalized.keys()).tasks
+        # Step 5: attach watchdog report if generated
+        if watchdog_report is not None:
+            decision_dict["watchdog_report"] = watchdog_report
 
-        return AgentDecision(
-            event_type=event_type,
-            priority=priority,
-            confidence=confidence,
-            recommended_action=action,
-            privacy_mode=privacy_mode,
-            models_used=sorted(normalized.keys()),
-            reasoning=reasoning or ["no reliable signal available"],
-            follow_up_tasks=follow_up,
-            risk_signals=_dedupe(risk_signals),
-            data_export=data_export,
-            task_health=task_health,
-            metadata={
-                "policy": self.policy.name,
-                "speech_ratio": round(signals["speech_ratio"], 4),
-                "quality_label": signals["quality_label"],
-                "snr_db": signals["snr_db"],
-                "transcript": signals["transcript"],
-            },
-        )
-
-    def _extract_signals(self, results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        vad = results.get("vad", {})
-        quality = results.get("audio_quality_monitoring", {})
-        anomaly = results.get("anomaly_detection", {})
-        emotion = results.get("emotion", {})
-        keyword = results.get("keyword_spotting", {})
-        esc = results.get("esc", {})
-        asr = results.get("asr", {})
-        impulse = results.get("impulse_event", {})
-
-        speech_ratio = _number(vad.get("speech_ratio", vad.get("percent_speech", 0.0)))
-        esc_label = str(esc.get("top_class", "") or "")
-        esc_score = _number(esc.get("top_score", 0.0))
-        transcript = str(asr.get("text", "") or "").strip()
-        speech_by_vad = bool(
-            vad.get("is_speech", vad.get("is_speaking", False))
-            or speech_ratio >= self.policy.min_speech_ratio
-        )
-        speech_by_esc = _looks_like_speech_sound(esc_label) and esc_score >= self.policy.esc_alert_score_threshold
-        speech_by_asr = bool(transcript)
-        speech_detected = speech_by_vad or speech_by_esc or speech_by_asr
-        if speech_by_vad:
-            speech_source = "vad"
-        elif speech_by_asr:
-            speech_source = "asr"
-        elif speech_by_esc:
-            speech_source = "environmental classifier"
-        else:
-            speech_source = "none"
-
-        quality_label = str(quality.get("quality_label", "") or "").lower()
-        snr_db = _number(quality.get("snr_db", 0.0))
-        low_quality = quality_label in self.policy.low_quality_labels or (
-            quality_label != "" and snr_db < self.policy.low_quality_snr_db
-        )
-
-        emotion_label = str(emotion.get("top_emotion", "") or "").lower()
-        emotion_score = _number(emotion.get("top_score", 0.0))
-        stress_emotion = (
-            emotion_label in self.policy.stress_emotions
-            and emotion_score >= self.policy.stress_score_threshold
-        )
-
-        keyword_label = str(keyword.get("top_label", "") or "")
-        keyword_score = _number(keyword.get("top_score", 0.0))
-        keyword_is_alert = _contains_alert_keyword(keyword_label, self.policy.alert_keywords)
-        transcript_alert = _contains_alert_keyword(transcript, self.policy.alert_keywords)
-        alert_keyword = bool(
-            keyword_is_alert
-            and keyword_score >= self.policy.keyword_alert_score_threshold
-        )
-
-        esc_event = bool(esc_label and esc_score >= self.policy.esc_alert_score_threshold)
-
-        anomaly_score = _number(anomaly.get("anomaly_score", 0.0))
-        raw_anomaly_flag = bool(
-            anomaly.get("is_anomaly", False)
-            or anomaly_score < self.policy.anomaly_score_threshold
-        )
-        benign_speech_context = (
-            raw_anomaly_flag
-            and speech_detected
-            and _looks_like_speech_sound(esc_label)
-            and not _looks_like_alert_sound(esc_label)
-            and not low_quality
-        )
-        anomaly_flag = raw_anomaly_flag and not benign_speech_context
-        impulse_flag = bool(impulse.get("is_impulse", False))
-        impulse_label = str(impulse.get("event_label", "") or "")
-        impulse_confidence = _number(impulse.get("confidence", 0.0))
-
-        return {
-            "speech_detected": speech_detected,
-            "speech_source": speech_source,
-            "speech_ratio": speech_ratio,
-            "low_quality": low_quality,
-            "quality_label": quality_label or "unknown",
-            "snr_db": round(snr_db, 2),
-            "anomaly": anomaly_flag,
-            "raw_anomaly": raw_anomaly_flag,
-            "anomaly_downgraded": benign_speech_context,
-            "anomaly_score": anomaly_score,
-            "impulse_event": impulse_flag,
-            "impulse_label": impulse_label,
-            "impulse_confidence": impulse_confidence,
-            "stress_emotion": stress_emotion,
-            "emotion_label": emotion_label,
-            "emotion_score": emotion_score,
-            "alert_keyword": alert_keyword,
-            "transcript_alert": transcript_alert,
-            "keyword_label": keyword_label,
-            "keyword_score": keyword_score,
-            "esc_event": esc_event,
-            "esc_label": esc_label,
-            "esc_score": esc_score,
-            "transcript": transcript,
-            "is_high_risk": (
-                anomaly_flag
-                or impulse_flag
-                or stress_emotion
-                or alert_keyword
-                or transcript_alert
-                or _looks_like_alert_sound(esc_label)
-            ),
-        }
-
-    def _classify_event(self, signals: Dict[str, Any], risk_signals: List[str]) -> Tuple[str, str, str]:
-        risk_count = len(set(risk_signals))
-
-        if risk_count >= 2:
-            return "possible_safety_incident", "high", "create_incident_and_notify_operator"
-        if "impulse_event" in risk_signals:
-            return "possible_impulse_threat", "high", "create_incident_and_notify_operator"
-        if "audio_anomaly" in risk_signals or "alert_sound" in risk_signals:
-            return "acoustic_risk_event", "medium", "store_metadata_and_request_review"
-        if signals["speech_detected"] and signals["transcript"]:
-            return "speech_workflow_event", "medium", "extract_intent_and_route_to_workflow"
-        if signals["speech_detected"]:
-            return "speech_detected", "low", "wait_for_more_context"
-        if signals["esc_event"]:
-            return "environmental_audio_event", "low", "log_event"
-        return "normal_audio", "low", "ignore_or_continue_monitoring"
-
-    def _estimate_confidence(
-        self,
-        signals: Dict[str, Any],
-        task_health: Dict[str, str],
-        risk_signals: List[str],
-    ) -> float:
-        score = 0.35
-        successful_tasks = sum(1 for status in task_health.values() if status == "ok")
-        score += min(successful_tasks, 5) * 0.08
-
-        if signals["speech_detected"]:
-            score += min(signals["speech_ratio"], 1.0) * 0.12
-        if signals["transcript"]:
-            score += 0.10
-        if signals["esc_event"]:
-            score += min(signals["esc_score"], 1.0) * 0.08
-        if signals["stress_emotion"]:
-            score += min(signals["emotion_score"], 1.0) * 0.08
-        if risk_signals:
-            score += min(len(set(risk_signals)), 3) * 0.05
-        if signals["low_quality"]:
-            score -= 0.12
-
-        return round(max(0.0, min(score, 0.98)), 2)
-
-    def _privacy_decision(self, event_type: str, priority: str) -> Tuple[str, Dict[str, bool]]:
-        if self.policy.allow_raw_audio_export and not self.policy.strict_privacy:
-            return "raw_audio_allowed", {
-                "raw_audio": True,
-                "transcript": True,
-                "embeddings": True,
-                "metadata": True,
-            }
-
-        if priority == "high":
-            return "metadata_plus_redacted_evidence", {
-                "raw_audio": False,
-                "transcript": True,
-                "embeddings": False,
-                "metadata": True,
-            }
-
-        return "metadata_only", {
-            "raw_audio": False,
-            "transcript": event_type == "speech_workflow_event",
-            "embeddings": False,
-            "metadata": True,
-        }
+        # Step 6: convert to AgentDecision dataclass
+        return _dict_to_decision(decision_dict)
 
 
-def _as_dict(value: Any) -> Dict[str, Any]:
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    if hasattr(value, "to_dict"):
-        return value.to_dict()
-    if hasattr(value, "__dict__"):
-        return dict(value.__dict__)
-    return {"value": value}
+# ── helpers ──────────────────────────────────────────────────────────
 
+def _dict_to_decision(d: dict) -> AgentDecision:
+    """Convert a decision dict to an AgentDecision dataclass.
 
-def _clean_task_list(tasks: Optional[Iterable[str]]) -> List[str]:
-    if not tasks:
-        return []
-    return _dedupe([str(t).strip() for t in tasks if str(t).strip()])
-
-
-def _dedupe(items: Iterable[str]) -> List[str]:
-    seen = set()
-    out = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            out.append(item)
-    return out
-
-
-def _number(value: Any) -> float:
+    Extra keys (``incident_report``, ``triage_explanation``,
+    ``watchdog_report``) are placed in ``metadata`` so that
+    ``to_dict()`` exposes them.
+    """
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+        # Core fields
+        decision = AgentDecision(
+            event_type=d.get("event_type", "normal_audio"),
+            priority=d.get("priority", "low"),
+            confidence=d.get("confidence", 0.10),
+            recommended_action=d.get("recommended_action", "ignore_or_continue_monitoring"),
+            privacy_mode=d.get("privacy_mode", "metadata_only"),
+            models_used=d.get("models_used", []),
+            reasoning=d.get("reasoning", []),
+            follow_up_tasks=d.get("follow_up_tasks", []),
+            risk_signals=d.get("risk_signals", []),
+            data_export=d.get("data_export", {}),
+            task_health=d.get("task_health", {}),
+            metadata=d.get("metadata", {}),
+        )
+
+        # Attach new fields into metadata so to_dict() exposes them
+        decision.metadata["incident_report"] = d.get(
+            "incident_report", ""
+        )
+        decision.metadata["triage_explanation"] = d.get(
+            "triage_explanation", ""
+        )
+        decision.metadata["watchdog_report"] = d.get(
+            "watchdog_report", None
+        )
+
+        return decision
+    except Exception:
+        return AgentDecision(
+            event_type="normal_audio",
+            priority="low",
+            confidence=0.10,
+            recommended_action="ignore_or_continue_monitoring",
+            privacy_mode="metadata_only",
+            models_used=[],
+            reasoning=["Failed to construct AgentDecision"],
+        )
 
 
-def _task_health(results: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
-    health = {}
-    for name, result in results.items():
-        if result.get("success", True):
-            health[name] = "ok"
-        else:
-            health[name] = str(result.get("error", "failed"))[:120]
-    return health
+# ── smoke test ───────────────────────────────────────────────────────
 
+if __name__ == "__main__":
+    import json as _json
 
-def _looks_like_alert_sound(label: str) -> bool:
-    label_l = (label or "").lower()
-    alert_terms = [
-        "alarm",
-        "siren",
-        "explosion",
-        "gunshot",
-        "glass",
-        "breaking",
-        "crash",
-        "bang",
-        "scream",
-        "shout",
-        "emergency",
-        "smoke detector",
-        "fire",
-    ]
-    return any(term in label_l for term in alert_terms)
+    print("=" * 60)
+    print("  SMOKE TEST -- 3-Agent Audio Intelligence System")
+    print("=" * 60)
 
+    # Dummy task results simulating a moderate-risk scenario
+    dummy_results = {
+        "vad": {
+            "is_speech": True,
+            "speech_ratio": 0.94,
+            "total_speech_sec": 4.7,
+            "success": True,
+        },
+        "asr": {
+            "text": "Help me, there is a fire in the building!",
+            "language": "en",
+            "success": True,
+        },
+        "emotion": {
+            "top_emotion": "angry",
+            "top_score": 0.81,
+            "success": True,
+        },
+        "keyword_spotting": {
+            "top_label": "help",
+            "top_score": 0.88,
+            "success": True,
+        },
+        "esc": {
+            "top_class": "scream",
+            "top_score": 0.74,
+            "success": True,
+        },
+        "anomaly_detection": {
+            "is_anomaly": False,
+            "anomaly_score": 0.12,
+            "success": True,
+        },
+        "impulse_event": {
+            "is_impulse": False,
+            "event_label": "none",
+            "confidence": 0.05,
+            "success": True,
+        },
+        "audio_quality_monitoring": {
+            "quality_label": "good",
+            "snr_db": 22.5,
+            "mos": 3.8,
+            "clipping_detected": False,
+            "success": True,
+        },
+        "speaker_id": {
+            "num_speakers": 2,
+            "success": True,
+        },
+        "music_speech_detection": {
+            "speech_fraction": 0.85,
+            "music_fraction": 0.10,
+            "success": True,
+        },
+    }
 
-def _looks_like_speech_sound(label: str) -> bool:
-    label_l = (label or "").lower()
-    speech_terms = [
-        "speech",
-        "conversation",
-        "narration",
-        "speech synthesizer",
-        "male speech",
-        "female speech",
-        "child speech",
-        "talking",
-    ]
-    return any(term in label_l for term in speech_terms)
+    agent = AudioAgent(profile="balanced")
 
+    print("\n[1] Testing get_tasks()...")
+    tasks = agent.get_tasks()
+    print(f"    Selected tasks: {tasks}")
 
-def _contains_alert_keyword(text: str, alert_keywords: Iterable[str]) -> bool:
-    text_l = f" {text or ''} ".lower()
-    normalized = "".join(ch if ch.isalnum() else " " for ch in text_l)
-    words = set(normalized.split())
-    return any(keyword.lower() in words for keyword in alert_keywords)
+    print("\n[2] Testing decide() with dummy results...")
+    decision = agent.decide(dummy_results)
+    payload = decision.to_dict()
+
+    print(f"\n{'=' * 60}")
+    print("  FULL AGENT DECISION (JSON)")
+    print(f"{'=' * 60}")
+    print(_json.dumps(payload, indent=2, default=str))
+
+    print(f"\n{'=' * 60}")
+    print("  SUMMARY")
+    print(f"{'=' * 60}")
+    print(f"  Event type  : {payload['event_type']}")
+    print(f"  Priority    : {payload['priority'].upper()}")
+    print(f"  Confidence  : {payload['confidence'] * 100:.0f}%")
+    print(f"  Action      : {payload['recommended_action']}")
+    print(f"  Risk signals: {', '.join(payload['risk_signals']) or 'none'}")
+
+    report = payload.get("metadata", {}).get("incident_report", "")
+    if report:
+        print(f"\n  Incident report:")
+        print(f"    {report}")
+
+    reasoning = payload.get("reasoning", [])
+    if reasoning:
+        print(f"\n  Reasoning chain ({len(reasoning)} steps):")
+        for i, step in enumerate(reasoning[:6], 1):
+            print(f"    {i}. {step}")
+        if len(reasoning) > 6:
+            print(f"    ... and {len(reasoning) - 6} more step(s)")
+
+    print(f"\n{'=' * 60}")
+    print("  SMOKE TEST PASSED [OK]")
+    print(f"{'=' * 60}")

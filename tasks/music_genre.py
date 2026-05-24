@@ -32,22 +32,27 @@ def _load_music_genre_model() -> Dict[str, Any]:
     """Lazy loader for the DistilHuBERT GTZAN model."""
     from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
     
-    logger.info(f"Loading Music Genre Model (GTZAN): {MUSIC_GENRE_MODEL_ID}")
+    logger.info(f"Loading Music Genre Model (GTZAN) from HF cache: {MUSIC_GENRE_MODEL_ID}")
     
     try:
         extractor = AutoFeatureExtractor.from_pretrained(
             MUSIC_GENRE_MODEL_ID,
-            cache_dir=str(MODELS_DIR / "hf_cache")
+            cache_dir=str(MODELS_DIR / "hf_cache"),
+            local_files_only=True,
         )
         model = AutoModelForAudioClassification.from_pretrained(
             MUSIC_GENRE_MODEL_ID,
             cache_dir=str(MODELS_DIR / "hf_cache"),
+            local_files_only=True,
         )
         model.eval().to(DEVICE)
         logger.info("Music Genre model loaded successfully.")
         return {"extractor": extractor, "model": model}
     except Exception as e:
-        logger.error(f"Failed to load Music Genre model: {e}")
+        logger.error(
+            f"Model not found at {MODELS_DIR / 'hf_cache'}/models--{MUSIC_GENRE_MODEL_ID.replace('/', '--')} "
+            f"-- download with: python download_models.py --task music_genre. Error: {e}"
+        )
         return None
 
 # Register the loader

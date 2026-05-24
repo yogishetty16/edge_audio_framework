@@ -1,7 +1,7 @@
 """
 tasks/vad.py  [EDGE EDITION]
 ============================
-Task 6: Voice Activity Detection — Silero VAD ONNX.
+Task 6: Voice Activity Detection -- Silero VAD ONNX.
 Model: Silero VAD (2MB ONNX model, <1ms per 30ms chunk).
 Supports both streaming (chunk) and batch (full-file) modes.
 """
@@ -49,7 +49,7 @@ def _find_silero_onnx():
 
 
 def _load_model():
-    """Load Silero VAD — tries local ONNX first, then torch.hub."""
+    """Load Silero VAD -- tries local ONNX first, raises error if not found."""
     import torch
     import sys
 
@@ -57,14 +57,28 @@ def _load_model():
 
     if onnx_path:
         logger.info(f"Loading Silero VAD from local ONNX: {onnx_path}")
-        # Load using silero-vad local repo hub interface
-        silero_dir = MODELS_DIR / "silero-vad"
-        if silero_dir.exists() and str(silero_dir) not in sys.path:
-            sys.path.insert(0, str(silero_dir))
-        if (silero_dir / "hubconf.py").exists():
+        from pathlib import Path
+        # Look for hubconf.py in parent directories of onnx_path
+        p = Path(onnx_path).parent
+        hubconf_dir = None
+        while p != p.parent:
+            if (p / "hubconf.py").exists():
+                hubconf_dir = p
+                break
+            p = p.parent
+        
+        # Fallback to MODELS_DIR / "silero-vad"
+        if not hubconf_dir:
+            silero_dir = MODELS_DIR / "silero-vad"
+            if (silero_dir / "hubconf.py").exists():
+                hubconf_dir = silero_dir
+
+        if hubconf_dir:
+            if str(hubconf_dir) not in sys.path:
+                sys.path.insert(0, str(hubconf_dir))
             try:
                 model, utils = torch.hub.load(
-                    repo_or_dir=str(silero_dir),
+                    repo_or_dir=str(hubconf_dir),
                     model="silero_vad",
                     force_reload=False,
                     onnx=True,
@@ -76,15 +90,15 @@ def _load_model():
                 logger.info(f"Local hub interface unavailable, using direct ONNX VAD: {e}")
         return _load_onnx_direct(onnx_path)
     else:
-        logger.info("Silero ONNX not found locally, downloading from torch.hub...")
-        model, utils = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            force_reload=False,
-            onnx=True,
-            trust_repo=True,
+        logger.error(
+            "Silero VAD ONNX not found locally. Expected at: "
+            f"{MODELS_DIR / 'silero-vad' / 'files' / 'silero_vad.onnx'} or "
+            f"{MODELS_DIR / 'torch_hub'} -- download with: python download_models.py --task vad"
         )
-        return {"model": model, "utils": utils}
+        raise FileNotFoundError(
+            f"Silero VAD ONNX model not found in {MODELS_DIR}. "
+            "Run: python download_models.py --task vad"
+        )
 
 
 def _load_onnx_direct(onnx_path: str):
@@ -223,7 +237,7 @@ def analyze(audio: AudioData, threshold: float = THRESHOLD, **kwargs) -> VADResu
         return VADResult(success=False, error=str(e))
 
 
-# ─── Streaming helper for real-time use ──────────────────────────────────────
+# --- Streaming helper for real-time use ------------------------------------------
 
 class SileroVADStreamer:
     """

@@ -27,17 +27,25 @@ except ImportError:
 
 MODEL_ID = "MIT/ast-finetuned-speech-commands-v2"
 
-# Configurable keyword whitelist — None means return top‑5 from all 35 commands
+# Configurable keyword whitelist — None means return top-5 from all 35 commands
 KEYWORD_WHITELIST = None   # e.g., ["yes", "no", "stop", "go"]
 
 
 def _load_model():
-    logger.info(f"Loading AST keyword model: {MODEL_ID}")
-    extractor = AutoFeatureExtractor.from_pretrained(MODEL_ID, cache_dir=get_hf_cache_dir())
-    model = ASTForAudioClassification.from_pretrained(
-        MODEL_ID,
-        cache_dir=get_hf_cache_dir()
-    )
+    logger.info(f"Loading AST keyword model from HF cache: {MODEL_ID}")
+    try:
+        extractor = AutoFeatureExtractor.from_pretrained(
+            MODEL_ID, cache_dir=get_hf_cache_dir(), local_files_only=True,
+        )
+        model = ASTForAudioClassification.from_pretrained(
+            MODEL_ID, cache_dir=get_hf_cache_dir(), local_files_only=True,
+        )
+    except Exception as e:
+        logger.error(
+            f"Model not found at {get_hf_cache_dir()}/models--{MODEL_ID.replace('/', '--')} "
+            f"-- download with: python download_models.py --task keyword_spotting. Error: {e}"
+        )
+        raise
     model.eval().to(DEVICE)
     return {"model": model, "extractor": extractor}
 

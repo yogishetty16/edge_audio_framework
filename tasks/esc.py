@@ -41,18 +41,36 @@ def _load_model():
         logger.info(f"Loading AST ONNX INT8: {onnx_path}")
         from core.onnx_utils import create_onnx_session
         session = create_onnx_session(str(onnx_path))
-        extractor = AutoFeatureExtractor.from_pretrained(MODEL_ID, cache_dir=get_hf_cache_dir())
+        try:
+            extractor = AutoFeatureExtractor.from_pretrained(
+                MODEL_ID, cache_dir=get_hf_cache_dir(), local_files_only=True,
+            )
+        except Exception as e:
+            logger.error(
+                f"Model not found at {get_hf_cache_dir()}/models--{MODEL_ID.replace('/', '--')} "
+                f"-- download with: python download_models.py --task esc. Error: {e}"
+            )
+            raise
         id2label = _load_id2label()
         return {"type": "onnx", "session": session, "extractor": extractor, "id2label": id2label}
 
     # Fallback: HuggingFace PyTorch
-    logger.info(f"Loading AST (PyTorch): {MODEL_ID}")
+    logger.info(f"Loading AST (PyTorch) from HF cache: {MODEL_ID}")
     import torch
 
-    extractor = AutoFeatureExtractor.from_pretrained(MODEL_ID, cache_dir=get_hf_cache_dir())
-    model = ASTForAudioClassification.from_pretrained(
-        MODEL_ID, cache_dir=get_hf_cache_dir()
-    )
+    try:
+        extractor = AutoFeatureExtractor.from_pretrained(
+            MODEL_ID, cache_dir=get_hf_cache_dir(), local_files_only=True,
+        )
+        model = ASTForAudioClassification.from_pretrained(
+            MODEL_ID, cache_dir=get_hf_cache_dir(), local_files_only=True,
+        )
+    except Exception as e:
+        logger.error(
+            f"Model not found at {get_hf_cache_dir()}/models--{MODEL_ID.replace('/', '--')} "
+            f"-- download with: python download_models.py --task esc. Error: {e}"
+        )
+        raise
     model.eval().to(DEVICE)
     id2label = model.config.id2label
     return {"type": "torch", "model": model, "extractor": extractor, "id2label": id2label}
@@ -62,7 +80,9 @@ def _load_id2label() -> dict:
     """Load id2label from config.json in HF cache."""
     try:
         from transformers import AutoConfig
-        cfg = AutoConfig.from_pretrained(MODEL_ID, cache_dir=get_hf_cache_dir())
+        cfg = AutoConfig.from_pretrained(
+            MODEL_ID, cache_dir=get_hf_cache_dir(), local_files_only=True,
+        )
         return cfg.id2label
     except Exception:
         return {}

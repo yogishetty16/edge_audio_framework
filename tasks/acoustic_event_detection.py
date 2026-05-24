@@ -47,13 +47,22 @@ def _load_model():
             logger.info(f"PANNs PyTorch unavailable, falling back to AST: {e}")
 
     # 3) Fallback to AST (same model as ESC task — shared registry entry)
-    logger.info(f"PANNs not found, using AST for AED: {AST_MODEL_ID}")
+    logger.info(f"PANNs not found, using AST for AED from HF cache: {AST_MODEL_ID}")
     from transformers import AutoFeatureExtractor, ASTForAudioClassification
     import torch
-    extractor = AutoFeatureExtractor.from_pretrained(AST_MODEL_ID, cache_dir=get_hf_cache_dir())
-    model = ASTForAudioClassification.from_pretrained(
-        AST_MODEL_ID, cache_dir=get_hf_cache_dir()
-    )
+    try:
+        extractor = AutoFeatureExtractor.from_pretrained(
+            AST_MODEL_ID, cache_dir=get_hf_cache_dir(), local_files_only=True,
+        )
+        model = ASTForAudioClassification.from_pretrained(
+            AST_MODEL_ID, cache_dir=get_hf_cache_dir(), local_files_only=True,
+        )
+    except Exception as e:
+        logger.error(
+            f"Model not found at {get_hf_cache_dir()}/models--{AST_MODEL_ID.replace('/', '--')} "
+            f"-- download with: python download_models.py --task acoustic_event_detection. Error: {e}"
+        )
+        raise
     model.eval().to(DEVICE)
     return {"type": "ast", "model": model, "extractor": extractor,
             "id2label": model.config.id2label}

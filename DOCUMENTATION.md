@@ -657,3 +657,30 @@ python fast_run_file.py --file "incident_audio.wav" --agent --tasks vad,asr,spea
 | **Total** | **~1.1 GB** | |
 
 All models are stored in the `models/` directory inside the project and require no internet at runtime.
+
+
+## Airgapped Office Deployment via GitHub Releases
+
+Because corporate networks often block HuggingFace, USB drives, and personal cloud storage, but **allow GitHub**, we use GitHub Releases to bypass size limits and transfer the models.
+
+### Step 1: Prepare on Personal Unrestricted PC
+1. Ensure all models are downloaded to the models/ folder.
+2. Run python split_for_github.py to split the massive models.zip file into chunks under 1.5 GB (e.g., models.zip.part1, models.zip.part2).
+3. Push the framework code to your GitHub Repository (models/ is ignored by .gitignore).
+4. Open your GitHub Repository in a web browser, go to **Releases**, create a new Release, and drag-and-drop the .part files to attach them.
+
+### Step 2: Deploy on Restricted Office Linux PC
+1. Open the terminal and clone the code: git clone https://github.com/Yogendra-A/edge_audio_framework.git
+2. Open the office web browser and download the .part files from your GitHub Releases page.
+3. Stitch the split zip files back together in the terminal:
+   `ash
+   cat models.zip.part1 models.zip.part2 > models.zip
+   `
+4. Extract the models: unzip models.zip
+5. Setup the Python environment and run offline:
+   `ash
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   python fast_run.py --agent --tasks vad,asr,emotion,speaker_id
+   `

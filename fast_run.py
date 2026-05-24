@@ -26,6 +26,9 @@ os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"  # Fix Protobuf 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"]      = "false"
 os.environ["HF_HUB_VERBOSITY"]           = "error"
+os.environ["TRANSFORMERS_OFFLINE"]        = "1"
+os.environ["HF_DATASETS_OFFLINE"]        = "1"
+os.environ["HF_HUB_OFFLINE"]             = "1"
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 os.environ["HF_HOME"]    = os.path.join(_ROOT, "models", "hf_cache")
@@ -207,6 +210,29 @@ def run_parallel(audio_np, sr, tasks):
     total_ms = (time.perf_counter() - t0) * 1000
     return results, total_ms
 
+WHISPER_LANGUAGES = {
+    "en": "English", "zh": "Chinese", "de": "German", "es": "Spanish", "ru": "Russian",
+    "ko": "Korean", "fr": "French", "ja": "Japanese", "pt": "Portuguese", "tr": "Turkish",
+    "pl": "Polish", "ca": "Catalan", "nl": "Dutch", "ar": "Arabic", "sv": "Swedish",
+    "it": "Italian", "id": "Indonesian", "hi": "Hindi", "fi": "Finnish", "vi": "Vietnamese",
+    "he": "Hebrew", "uk": "Ukrainian", "el": "Greek", "ms": "Malay", "cs": "Czech",
+    "ro": "Romanian", "da": "Danish", "hu": "Hungarian", "ta": "Tamil", "no": "Norwegian",
+    "th": "Thai", "ur": "Urdu", "hr": "Croatian", "bg": "Bulgarian", "lt": "Lithuanian",
+    "la": "Latin", "mi": "Maori", "ml": "Malayalam", "cy": "Welsh", "sk": "Slovak",
+    "te": "Telugu", "fa": "Persian", "lv": "Latvian", "bn": "Bengali", "sr": "Serbian",
+    "az": "Azerbaijani", "sl": "Slovenian", "kn": "Kannada", "et": "Estonian", "mk": "Macedonian",
+    "br": "Breton", "eu": "Basque", "is": "Icelandic", "hy": "Armenian", "ne": "Nepali",
+    "mn": "Mongolian", "bs": "Bosnian", "kk": "Kazakh", "sq": "Albanian", "sw": "Swahili",
+    "gl": "Galician", "mr": "Marathi", "pa": "Punjabi", "si": "Sinhala", "km": "Khmer",
+    "sn": "Shona", "yo": "Yoruba", "so": "Somali", "af": "Afrikaans", "oc": "Occitan",
+    "ka": "Georgian", "be": "Belarusian", "tg": "Tajik", "sd": "sindhi", "gu": "Gujarati",
+    "am": "Amharic", "yi": "Yiddish", "lo": "Lao", "uz": "Uzbek", "fo": "Faroese",
+    "ht": "Haitian Creole", "ps": "Pashto", "tk": "Turkmen", "nn": "Nynorsk", "mt": "Maltese",
+    "sa": "Sanskrit", "lb": "Luxembourgish", "my": "Myanmar", "bo": "Tibetan", "tl": "Tagalog",
+    "mg": "Malagasy", "as": "Assamese", "tt": "Tatar", "haw": "Hawaiian", "ln": "Lingala",
+    "ha": "Hausa", "ba": "Bashkir", "jw": "Javanese", "su": "Sundanese", "yue": "Cantonese",
+}
+
 
 LABELS = {
     "vad": "Voice Activity Detection", "asr": "Automatic Speech Recognition",
@@ -242,8 +268,10 @@ def print_results(results, total_ms, tasks):
             print(f"      Speech: {r.get('speech_ratio',0)*100:.1f}%  "
                   f"| Duration: {r.get('total_speech_sec',0):.2f}s")
         elif task_name == "asr":
-            print(f"      >> \"{r.get('text','')[:120]}\"")
-            print(f"      Language: {r.get('language','N/A')}")
+            print(f"      >> \"{r.get('text','')}\"")
+            lang_code = r.get('language','')
+            lang_name = WHISPER_LANGUAGES.get(lang_code, lang_code).title() if lang_code else 'N/A'
+            print(f"      Language: {lang_name}")
         elif task_name == "keyword_spotting":
             print(f"      Keyword: {r.get('top_label','')} "
                   f"({r.get('top_score',0)*100:.1f}%)")

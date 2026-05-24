@@ -70,15 +70,24 @@ def _load_emotion_model():
             local_files_only=True,
         )
     else:
-        logger.info(f"Loading fallback emotion model: {AUDIO_MODEL_ID}")
-        extractor = AutoFeatureExtractor.from_pretrained(
-            AUDIO_MODEL_ID,
-            cache_dir=get_hf_cache_dir(),
-        )
-        model = AutoModelForAudioClassification.from_pretrained(
-            AUDIO_MODEL_ID,
-            cache_dir=get_hf_cache_dir(),
-        )
+        logger.info(f"Loading emotion model from HF cache: {AUDIO_MODEL_ID}")
+        try:
+            extractor = AutoFeatureExtractor.from_pretrained(
+                AUDIO_MODEL_ID,
+                cache_dir=get_hf_cache_dir(),
+                local_files_only=True,
+            )
+            model = AutoModelForAudioClassification.from_pretrained(
+                AUDIO_MODEL_ID,
+                cache_dir=get_hf_cache_dir(),
+                local_files_only=True,
+            )
+        except Exception as e:
+            logger.error(
+                f"Model not found at {get_hf_cache_dir()}/models--{AUDIO_MODEL_ID.replace('/', '--')} "
+                f"-- download with: python download_models.py --task emotion. Error: {e}"
+            )
+            raise
     model.eval().to(DEVICE)
     return {"model": model, "extractor": extractor}
 
