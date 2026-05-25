@@ -103,34 +103,62 @@ if _REGISTRY_OK:
     registry.register("emotion_text", _load_sentiment_model)
 
 
-def analyze(audio: AudioData, transcript: Optional[str] = None, **kwargs) -> EmotionResult:
-    """Detect emotion from audio. Returns EmotionResult."""
-    import torch
-    import torch.nn.functional as F
+from dataclasses import dataclass
+
+@dataclass
+class CustomEmotionResult(EmotionResult):
+    low_confidence_note: Optional[str] = None
+    skipped: Optional[bool] = None
+    skip_reason: Optional[str] = None
+    low_confidence: Optional[bool] = None
+
+    def __setitem__(self, key, value):
+        setattr(self, key, value)
+
+
+def run(waveform, sr, vad_result=None):
+    speech_ratio = 0.0
+    if vad_result:
+        if isinstance(vad_result, dict):
+            speech_ratio = vad_result.get("speech_ratio", 0.0)
+        else:
+            speech_ratio = getattr(vad_result, "speech_ratio", 0.0)
+
+    if speech_ratio < 0.25:
+        return {
+            "top_emotion": "neutral",
+            "top_score": 0.0,
+            "all_emotions": {},
+            "success": True,
+            "skipped": True,
+            "skip_reason": "insufficient_speech",
+            "speech_ratio": speech_ratio
+        }
 
     if not _REGISTRY_OK:
-        return EmotionResult(success=False,
-                             error="model_registry unavailable (SSL/import error). Run ssl_fix.py first.")
+        return {
+            "top_emotion": "neutral",
+            "top_score": 0.0,
+            "all_emotions": {},
+            "success": False,
+            "error": "model_registry unavailable"
+        }
 
-    emotion_scores: Dict[str, float] = {}
-    top_emotion = ""
-    top_score = 0.0
-    sentiment = None
-
-    # ── Audio emotion ─────────────────────────────────────────────────────────
     try:
+        import torch
+        import torch.nn.functional as F
+
         bundle = registry.get("emotion_audio")
         model = bundle["model"]
         extractor = bundle["extractor"]
 
-        waveform = audio.waveform
-        max_len = 10 * audio.sample_rate
+        max_len = 10 * sr
         if len(waveform) > max_len:
             waveform = waveform[:max_len]
 
         inputs = extractor(
             waveform,
-            sampling_rate=audio.sample_rate,
+            sampling_rate=sr,
             return_tensors="pt",
             padding=True,
         ).to(DEVICE)
@@ -148,29 +176,84 @@ def analyze(audio: AudioData, transcript: Optional[str] = None, **kwargs) -> Emo
         top_emotion, top_score = max(emotion_scores.items(), key=lambda x: x[1])
         top_score = round(top_score, 4)
 
+        # FIX 3 — Happy suppression on non-speech context
+        if top_emotion == "happy" and top_score < 0.70:
+            if speech_ratio < 0.50:
+                non_happy_scores = {k: v for k, v in emotion_scores.items() if k != "happy"}
+                if non_happy_scores:
+                    alt = max(non_happy_scores, key=lambda k: non_happy_scores[k])
+                    alt_score = non_happy_scores[alt]
+                    if alt_score > 0.25:
+                        top_emotion = alt
+                        top_score = alt_score
+                    else:
+                        top_emotion = "neutral"
+                        top_score = emotion_scores.get("neutral", 0.0)
+                else:
+                    top_emotion = "neutral"
+                    top_score = emotion_scores.get("neutral", 0.0)
+
+        # FIX 2 — Confidence threshold gate
+        CONFIDENCE_THRESHOLD = 0.55
+        if top_score < CONFIDENCE_THRESHOLD:
+            return {
+                "top_emotion": "neutral",
+                "top_score": top_score,
+                "all_emotions": emotion_scores,
+                "success": True,
+                "low_confidence": True,
+                "low_confidence_note": (
+                    f"Top emotion '{top_emotion}' at "
+                    f"{top_score:.1%} below threshold "
+                    f"{CONFIDENCE_THRESHOLD:.0%} — "
+                    f"returning neutral"
+                )
+            }
+
+        return {
+            "top_emotion": top_emotion,
+            "top_score": top_score,
+            "all_emotions": emotion_scores,
+            "success": True
+        }
+
     except Exception as e:
-        logger.warning(f"Audio emotion detection unavailable: {e}")
+        logger.warning(f"Audio emotion detection failed: {e}")
+        return {
+            "top_emotion": "neutral",
+            "top_score": 0.0,
+            "all_emotions": {},
+            "success": False,
+            "error": str(e)
+        }
 
-    # ── Text sentiment (runs only if transcript provided) ─────────────────────
-    if transcript and transcript.strip():
+
+def analyze(audio: AudioData, transcript: Optional[str] = None, **kwargs) -> EmotionResult:
+    """Detect emotion from audio. Returns EmotionResult."""
+    vad_result = kwargs.get("vad_result")
+    if vad_result is None:
         try:
-            pipe = registry.get("emotion_text")
-            if pipe is not None:  # disabled when torch < 2.6
-                result = pipe(transcript[:512])[0]
-                raw_label = result["label"]
-                sentiment = SENTIMENT_MAP.get(raw_label, raw_label.lower())
-        except Exception as e:
-            logger.warning(f"Text sentiment failed: {e}")
+            import tasks.vad as vad_task
+            vad_result = vad_task.analyze(audio)
+        except Exception:
+            pass
 
+    run_res = run(audio.waveform, audio.sample_rate, vad_result)
 
-    if not top_emotion and not sentiment:
-        return EmotionResult(success=False, error="Emotion detection produced no results")
+    success = run_res.get("success", True)
+    error = run_res.get("error") if not success else None
 
-    return EmotionResult(
-        top_emotion=top_emotion,
-        top_score=top_score,
-        all_scores=emotion_scores,
-        sentiment=sentiment,
+    return CustomEmotionResult(
+        success=success,
+        error=error,
+        top_emotion=run_res.get("top_emotion", ""),
+        top_score=run_res.get("top_score", 0.0),
+        all_scores=run_res.get("all_emotions", {}),
+        sentiment=None,
+        low_confidence_note=run_res.get("low_confidence_note"),
+        skipped=run_res.get("skipped"),
+        skip_reason=run_res.get("skip_reason"),
+        low_confidence=run_res.get("low_confidence")
     )
 
 

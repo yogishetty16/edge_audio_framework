@@ -72,6 +72,9 @@ class ReasoningEngine:
             esc_score = _num(esc.get("top_score", 0.0))
             emotion_label = str(emotion.get("top_emotion", "") or "").lower()
             emotion_score = _num(emotion.get("top_score", 0.0))
+            emotion_skipped = bool(emotion.get("skipped", False))
+            emotion_low_confidence = bool(emotion.get("low_confidence", False))
+            emotion_low_confidence_note = str(emotion.get("low_confidence_note", "") or "")
             anomaly_flag = bool(anomaly.get("is_anomaly", False))
             anomaly_score = _num(anomaly.get("anomaly_score", 0.0))
             impulse_flag = bool(impulse.get("is_impulse", False))
@@ -91,6 +94,9 @@ class ReasoningEngine:
                 "speech_duration_sec": round(speech_duration_sec, 3),
                 "emotion": emotion_label,
                 "emotion_score": round(emotion_score, 4),
+                "emotion_skipped": emotion_skipped,
+                "emotion_low_confidence": emotion_low_confidence,
+                "emotion_low_confidence_note": emotion_low_confidence_note,
                 "transcript": transcript,
                 "keywords": str(keywords_raw or ""),
                 "esc_class": esc_class,
@@ -115,6 +121,9 @@ class ReasoningEngine:
                 "speech_duration_sec": 0.0,
                 "emotion": "",
                 "emotion_score": 0.0,
+                "emotion_skipped": False,
+                "emotion_low_confidence": False,
+                "emotion_low_confidence_note": "",
                 "transcript": "",
                 "keywords": "",
                 "esc_class": "",
@@ -183,20 +192,37 @@ class ReasoningEngine:
                 )
 
             # ── Emotion ────────────────────────────────────────────
-            emo = context.get("emotion", "")
-            emo_score = context.get("emotion_score", 0.0)
-            if emo and emo_score > 0:
+            if context.get("emotion_skipped"):
+                chain.append(
+                    "Emotion analysis skipped — insufficient "
+                    "speech detected for reliable classification"
+                )
+            elif context.get("emotion_low_confidence"):
+                emo = context.get("emotion", "")
+                emo_score = context.get("emotion_score", 0.0)
                 pct = round(emo_score * 100, 1)
-                if emo in {"angry", "fear", "fearful", "sad", "disgust"}:
-                    chain.append(
-                        f"Emotion classifier returned {emo} at {pct}% confidence "
-                        f"— stress signal raised"
-                    )
-                else:
-                    chain.append(
-                        f"Emotion classifier returned {emo} at {pct}% confidence "
-                        f"— no stress indicated"
-                    )
+                note = context.get("emotion_low_confidence_note", "")
+                chain.append(
+                    f"Emotion classifier returned "
+                    f"{emo} at {pct}% — below "
+                    f"confidence threshold, treating as neutral. "
+                    f"Note: {note}"
+                )
+            else:
+                emo = context.get("emotion", "")
+                emo_score = context.get("emotion_score", 0.0)
+                if emo and emo_score > 0:
+                    pct = round(emo_score * 100, 1)
+                    if emo in {"angry", "fear", "fearful", "sad", "disgust"}:
+                        chain.append(
+                            f"Emotion classifier returned {emo} at {pct}% confidence "
+                            f"— stress signal raised"
+                        )
+                    else:
+                        chain.append(
+                            f"Emotion classifier returned {emo} at {pct}% confidence "
+                            f"— no stress indicated"
+                        )
 
             # ── Transcript / ASR ───────────────────────────────────
             transcript = context.get("transcript", "")

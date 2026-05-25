@@ -1,5 +1,7 @@
 import json
 import numpy as np
+import datetime
+import os
 from agent import AudioAgent
 from fast_run import print_agent_decision
 
@@ -7,6 +9,11 @@ def run_demo():
     print("="*60)
     print("  EDGE AUDIO FRAMEWORK AGENTIC LAYER DEMONSTRATION")
     print("="*60)
+
+    # Ensure memory directory exists and clear files to prevent pollution
+    os.makedirs("agent_memory", exist_ok=True)
+    open("agent_memory/investigations.jsonl", "w").close()
+    open("agent_memory/events.jsonl", "w").close()
 
     # Initialize AudioAgent
     agent = AudioAgent(profile="balanced")
@@ -52,6 +59,13 @@ def run_demo():
 
     investigation_id = decision_2.metadata.get("investigation_id")
     print(f"\nInvestigation opened: {investigation_id}")
+
+    # Backdate triggered_at by 65 seconds to simulate elapsed time realistically
+    inv = agent.investigation_agent.active_investigations[investigation_id]
+    inv["triggered_at"] = (
+        datetime.datetime.now(datetime.timezone.utc) - 
+        datetime.timedelta(seconds=65)
+    ).isoformat()
 
     # -------------------------------------------------------------
     # Scenario 3 — Follow-up confirms threat (investigation verdict)
@@ -120,6 +134,8 @@ def run_demo():
     # Scenario 4 — Watchdog shift summary (10 events)
     # -------------------------------------------------------------
     print("\n--- [SCENARIO 4] WATCHDOG SHIFT SUMMARY REPORT ---")
+    open("agent_memory/events.jsonl", "w").close()
+    agent._watchdog._event_count = 0
     print("Running 10 sequential events to trigger the periodic watchdog analysis loop...")
     
     # Reset watchdog count if needed, or let it accumulate

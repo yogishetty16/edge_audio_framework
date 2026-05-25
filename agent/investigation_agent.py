@@ -307,13 +307,13 @@ class InvestigationAgent:
         inv["verdict_reasoning"] = verdict_reasoning
         inv["timeline_summary"] = timeline_summary
         inv["status"] = "completed"
-        inv["completed_at"] = datetime.now(timezone.utc).isoformat()
+        completed_at = datetime.now(timezone.utc)
+        inv["completed_at"] = completed_at.isoformat()
         
         # Calculate duration
         try:
-            t_dt = datetime.fromisoformat(t_time)
-            c_dt = datetime.fromisoformat(inv["completed_at"])
-            duration = int((c_dt - t_dt).total_seconds())
+            triggered_at = datetime.fromisoformat(inv["triggered_at"])
+            duration = int((completed_at - triggered_at).total_seconds())
         except Exception:
             duration = 60
 

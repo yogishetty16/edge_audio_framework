@@ -87,60 +87,76 @@ TASK_SPEED = {
 }
 
 
+# Map task names to their module
+task_modules = {
+    "vad": "tasks.vad", "asr": "tasks.asr",
+    "keyword_spotting": "tasks.keyword_spotting",
+    "speaker_id": "tasks.speaker_id", "emotion": "tasks.emotion",
+    "speech_quality": "tasks.speech_quality",
+    "lang_accent_id": "tasks.accent_lang_id", "esc": "tasks.esc",
+    "acoustic_event_detection": "tasks.acoustic_event_detection",
+    "audio_quality_monitoring": "tasks.audio_quality_monitor",
+    "music_speech_detection": "tasks.music_speech_detection",
+    "anomaly_detection": "tasks.anomaly_detection",
+    "impulse_event": "tasks.impulse_event",
+    "music_genre": "tasks.music_genre",
+}
+
+slow_events = {}
+slow_errors = {}
+slow_times = {}
+
+import threading
+
+def _load_one(task_name):
+    import importlib
+    try:
+        from core.model_registry import registry
+        # Snapshot existing keys before importing the task module
+        keys_before = set(registry._factories.keys())
+        mod = importlib.import_module(task_modules[task_name])
+        # Only load models that THIS task registered
+        keys_after = set(registry._factories.keys())
+        new_keys = keys_after - keys_before
+        for key in new_keys:
+            try:
+                registry.get(key)
+            except Exception:
+                pass  # non-fatal: model will load lazily at runtime
+        return task_name, None
+    except Exception as e:
+        return task_name, str(e)
+
+def bg_load(task_name, load_fn):
+    t0 = time.time()
+    try:
+        res = load_fn()
+        err = None
+        if isinstance(res, tuple) and len(res) == 2:
+            _, err = res
+        if err:
+            slow_errors[task_name] = err
+        else:
+            slow_times[task_name] = time.time() - t0
+        slow_events[task_name].set()
+    except Exception as e:
+        slow_errors[task_name] = str(e)
+        slow_times[task_name] = time.time() - t0
+        slow_events[task_name].set()
+
 def prewarm_models(tasks: list):
     """Load all models into RAM before recording starts."""
-    from core.model_registry import registry
-    import importlib
-
     print("\n[PREWARM] Loading models into memory...")
-    t0 = time.perf_counter()
-
-    # Map task names to their module
-    task_modules = {
-        "vad": "tasks.vad", "asr": "tasks.asr",
-        "keyword_spotting": "tasks.keyword_spotting",
-        "speaker_id": "tasks.speaker_id", "emotion": "tasks.emotion",
-        "speech_quality": "tasks.speech_quality",
-        "lang_accent_id": "tasks.accent_lang_id", "esc": "tasks.esc",
-        "acoustic_event_detection": "tasks.acoustic_event_detection",
-        "audio_quality_monitoring": "tasks.audio_quality_monitor",
-        "music_speech_detection": "tasks.music_speech_detection",
-        "anomaly_detection": "tasks.anomaly_detection",
-        "impulse_event": "tasks.impulse_event",
-        "music_genre": "tasks.music_genre",
-    }
-
-    def _load_one(task_name):
-        try:
-            from core.model_registry import registry
-            # Snapshot existing keys before importing the task module
-            keys_before = set(registry._factories.keys())
-            mod = importlib.import_module(task_modules[task_name])
-            # Only load models that THIS task registered
-            keys_after = set(registry._factories.keys())
-            new_keys = keys_after - keys_before
-            for key in new_keys:
-                try:
-                    registry.get(key)
-                except Exception:
-                    pass  # non-fatal: model will load lazily at runtime
-            return task_name, None
-        except Exception as e:
-            return task_name, str(e)
-
-    # Load models in parallel threads
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        futures = {ex.submit(_load_one, t): t for t in tasks if t in task_modules}
-        for f in as_completed(futures):
-            name, err = f.result()
-            speed = TASK_SPEED.get(name, "?")
+    for task_name in tasks:
+        if task_name in task_modules:
+            t0 = time.time()
+            _, err = _load_one(task_name)
+            elapsed = time.time() - t0
             if err:
-                print(f"  [!] {name}: {err[:60]}")
+                print(f"  [!] {task_name}: {err[:60]}")
             else:
-                print(f"  [OK] {name} ({speed})")
+                print(f"  [OK] {task_name} ({elapsed:.1f}s)")
 
-    elapsed = time.perf_counter() - t0
-    print(f"[PREWARM] Done in {elapsed:.1f}s — first analysis will be fast!\n")
 
 
 def record_audio(duration_sec=5, device_index=None):
@@ -186,6 +202,12 @@ def run_parallel(audio_np, sr, tasks):
 
     def _run_task(task_name):
         try:
+            if task_name in slow_events:
+                if not slow_events[task_name].is_set():
+                    return task_name, {"success": False, "error": "Prewarm timed out"}
+                if task_name in slow_errors:
+                    return task_name, {"success": False, "error": f"Prewarm failed: {slow_errors[task_name]}"}
+
             mod = importlib.import_module(task_modules[task_name])
             t0 = time.perf_counter()
             result = mod.analyze(audio)
@@ -681,6 +703,27 @@ def main():
 
     agent = AudioAgent(args.agent_profile) if args.agent else None
 
+    # Resolve fast and slow tasks for prewarming
+    SLOW_MODEL_NAMES = {"emotion", "speaker_id", "lang_accent_id", "music_genre"}
+    prewarm_task_list = task_list
+    if not args.no_prewarm:
+        if agent and args.agent_mode == "orchestrated":
+            prewarm_task_list = agent.plan_initial_tasks(task_list).tasks
+
+    slow_tasks = [t for t in prewarm_task_list if t in SLOW_MODEL_NAMES] if not args.no_prewarm else []
+    fast_tasks_only = [t for t in prewarm_task_list if t not in SLOW_MODEL_NAMES] if not args.no_prewarm else []
+
+    # Start slow models background loading immediately — maximum head start
+    for task_name in slow_tasks:
+        slow_events[task_name] = threading.Event()
+        t = threading.Thread(
+            target=bg_load,
+            args=(task_name, lambda n=task_name: _load_one(n)),
+            daemon=True
+        )
+        t.start()
+        print(f"  [LOADING] {task_name} (background)...")
+
     print("="*55)
     print("  Edge Audio Framework — FAST MODE")
     print("  [Tasks run in PARALLEL]")
@@ -719,16 +762,33 @@ def main():
     if args.quick:
         print("  Quick    : enabled, slow model prewarm skipped")
 
-    # Pre-warm models BEFORE recording
+    # Pre-warm fast models BEFORE recording
     if not args.no_prewarm:
-        if agent and args.agent_mode == "orchestrated":
-            prewarm_models(agent.plan_initial_tasks(task_list).tasks)
-        else:
-            prewarm_models(task_list)
+        prewarm_models(fast_tasks_only)
 
     # Record audio
     audio_np, sr = record_audio(duration_sec=args.duration,
                                 device_index=args.device)
+
+    # Wait for slow models after recording finishes
+    is_first_run = not os.path.exists("agent_memory/calibration.json")
+    timeout = 450 if is_first_run else 90
+
+    first_run_printed = False
+    for task_name in list(slow_events.keys()):
+        if is_first_run and not first_run_printed:
+            print("[FIRST RUN] Emotion model loading cold.")
+            print("            This takes ~7 min once.")
+            print("            Subsequent runs load in ~90s.")
+            first_run_printed = True
+
+        loaded = slow_events[task_name].wait(timeout=timeout)
+        if not loaded or task_name in slow_errors:
+            print(f"  [WARN] {task_name} not ready: "
+                  f"{slow_errors.get(task_name, 'timeout')}")
+        else:
+            elapsed = slow_times.get(task_name, 0.0)
+            print(f"  [OK] {task_name} (background, {elapsed:.1f}s)")
 
     if agent and args.agent_mode == "orchestrated":
         results, total_ms, ordered_tasks = run_agent_orchestrated(audio_np, sr, agent, task_list)
