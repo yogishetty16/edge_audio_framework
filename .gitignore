@@ -31,5 +31,20 @@ agent_memory/
 # Temporary Zips
 *.zip
 
-models/
 models.zip*
+
+# Project Scripts, Guides, and Documentation to Ignore
+README.docx
+DOCUMENTATION.md
+DOCUMENTATION.docx
+Linux_Setup_Guide.docx
+Linux_Setup_Guide.pdf
+cleanup_unused_models.py
+convert_md_to_docx.py
+demo.py
+download_all_models.py
+download_models.py
+split_for_github.py
+setup_manual_models.py
+splitmanualymodels.py
+test_qai_whisper.py
