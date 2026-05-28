@@ -24,9 +24,9 @@ data/
 .DS_Store
 
 # Logs and Agent Memory
-agent_memory/
-*.log
-*.jsonl
+#agent_memory/
+#*.log
+#*.jsonl
 
 # Temporary Zips
 *.zip
@@ -41,7 +41,7 @@ Linux_Setup_Guide.docx
 Linux_Setup_Guide.pdf
 cleanup_unused_models.py
 convert_md_to_docx.py
-demo.py
+#demo.py
 download_all_models.py
 download_models.py
 split_for_github.py
@@ -49,4 +49,4 @@ setup_manual_models.py
 splitmanualymodels.py
 test_qai_whisper.py
 PYTHON_LIBRARIES.docx
-verify_models.py
+#verify_models.py

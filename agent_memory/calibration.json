@@ -1,0 +1,19 @@
+{
+  "calibrated_at": "2026-05-25T02:16:03.726841+00:00",
+  "environment_type": "industrial",
+  "baseline": {
+    "baseline_speech_ratio": 0.0,
+    "baseline_snr_db": 0.33,
+    "baseline_anomaly_score": -0.12,
+    "baseline_noise_class": "Static",
+    "baseline_energy_db": -46.03738008598192
+  },
+  "thresholds": {
+    "speech_ratio_threshold": 0.4,
+    "anomaly_score_threshold": -0.55,
+    "snr_alert_threshold": 4.0,
+    "energy_spike_threshold": -26.037380085981923
+  },
+  "calibration_version": 1,
+  "adjustments_count": 0
+}
