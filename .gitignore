@@ -35,12 +35,14 @@ models.zip*
 
 # Project Scripts, Guides, and Documentation to Ignore
 README.docx
-DOCUMENTATION.md
+#DOCUMENTATION.md
 DOCUMENTATION.docx
-Linux_Setup_Guide.docx
+#PYTHON_LIBRARIES.md
+#Linux_Setup_Guide.docx
 Linux_Setup_Guide.pdf
 cleanup_unused_models.py
 convert_md_to_docx.py
+
 #demo.py
 download_all_models.py
 download_models.py
